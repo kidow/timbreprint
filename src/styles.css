@@ -102,6 +102,10 @@ code {
   transform: translateY(1px);
 }
 
+.ui-button__spinner {
+  animation: spin 1s linear infinite;
+}
+
 .ui-button:disabled {
   cursor: not-allowed;
   opacity: 0.5;

@@ -124,6 +124,7 @@ function App() {
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [job, setJob] = useState<JobResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [isRunning, setIsRunning] = useState(false);
 
   const selectFile = async () => {
     setError(null);
@@ -149,7 +150,9 @@ function App() {
     if (!selectedPath) return;
 
     setError(null);
+    setIsRunning(true);
     setStatus("preprocessing");
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
 
     try {
       if (!isTauriRuntime()) {
@@ -167,6 +170,8 @@ function App() {
     } catch (err) {
       setStatus("failed");
       setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setIsRunning(false);
     }
   };
 
@@ -209,14 +214,11 @@ function App() {
 
           <div className="actions">
             <Button
-              disabled={!selectedPath || status === "preprocessing"}
+              disabled={!selectedPath || isRunning}
+              loading={isRunning}
               onClick={() => void runAnalysis()}
             >
-              {status === "preprocessing" ? (
-                <Loader2 className="spin" size={16} />
-              ) : (
-                <Terminal size={16} />
-              )}
+              {isRunning ? null : <Terminal size={16} />}
               분석 실행
             </Button>
             <StatusBadge status={status} />

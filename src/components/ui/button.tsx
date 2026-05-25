@@ -1,4 +1,5 @@
 import * as React from "react";
+import { Loader2 } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 
@@ -24,20 +25,30 @@ export interface ButtonProps
   extends React.ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: ButtonVariant;
   size?: ButtonSize;
+  loading?: boolean;
 }
 
 const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
-  ({ className, variant, size, type = "button", ...props }, ref) => {
+  (
+    { className, variant, size, loading = false, children, disabled, type = "button", ...props },
+    ref,
+  ) => {
     const variantClass = buttonVariantClasses[variant ?? "default"];
     const sizeClass = buttonSizeClasses[size ?? "default"];
+    const isDisabled = disabled || loading;
 
     return (
       <button
         ref={ref}
         type={type}
+        aria-busy={loading || undefined}
+        disabled={isDisabled}
         className={cn("ui-button", variantClass, sizeClass, className)}
         {...props}
-      />
+      >
+        {loading ? <Loader2 className="ui-button__spinner" size={16} /> : null}
+        {children}
+      </button>
     );
   },
 );
