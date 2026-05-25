@@ -3,7 +3,7 @@ import ReactDOM from "react-dom/client";
 import { open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { CheckCircle2, Copy, FileAudio, FolderOpen, Loader2, Terminal } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -60,6 +60,31 @@ type Analysis = {
   };
 };
 
+type PromptRewriteStatus = {
+  used: boolean;
+  backend: string;
+  model: string;
+  error?: string | null;
+};
+
+type ToolStatus = {
+  ffmpeg?: string | null;
+  python?: string | null;
+  ollama?: string | null;
+  ollamaModel: string;
+  appDataDir: string;
+  modelsDir: string;
+  logsDir: string;
+};
+
+type RecentJob = {
+  id: string;
+  status: string;
+  sourcePath: string;
+  jobDir: string;
+  createdAt: string;
+};
+
 type JobResult = {
   id: string;
   status: JobStatus;
@@ -67,6 +92,7 @@ type JobResult = {
   jobDir: string;
   analysis: Analysis;
   prompt: string;
+  promptRewrite: PromptRewriteStatus;
 };
 
 const isTauriRuntime = () => "__TAURI_INTERNALS__" in window;
@@ -143,6 +169,15 @@ const createBrowserPreviewJob = (sourcePath: string): JobResult => {
       { value: "recreating existing songs", confidence: 0.9 },
       { value: "recognizable copyrighted melody", confidence: 0.9 },
     ],
+    features: {
+      analysisBackend: "browser-preview",
+      taggingModelStatus: {
+        available: false,
+        libraryAvailable: false,
+        modelsDir: null,
+        missing: [],
+      },
+    },
   };
 
   return {
@@ -151,6 +186,12 @@ const createBrowserPreviewJob = (sourcePath: string): JobResult => {
     sourcePath,
     jobDir: "Tauri runtime required",
     analysis,
+    promptRewrite: {
+      used: false,
+      backend: "template",
+      model: "browser-preview",
+      error: null,
+    },
     prompt:
       "Create an original music track around 92 BPM centered around A minor. Style direction: indie electronic, ambient pop with spacious, reverb-heavy, intimate texture at medium energy. Mood: keep it melancholic, warm, hopeful. Arrangement: start minimal and let layers enter gradually, add subtle variation between sections with moderate steady pulse, clearly marked pulse. Sound palette: analog synth, soft drums, bass pad with balanced frequency profile, soft highs. Mix direction: wide atmospheric space, gentle reverb tail with controlled dynamics, even loudness. Avoid artist-specific references, recreating existing songs, recognizable copyrighted melody.",
   };
@@ -161,7 +202,36 @@ function App() {
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [job, setJob] = useState<JobResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [toolStatus, setToolStatus] = useState<ToolStatus | null>(null);
+  const [recentJobs, setRecentJobs] = useState<RecentJob[]>([]);
   const [isRunning, setIsRunning] = useState(false);
+
+  useEffect(() => {
+    void refreshLocalState();
+  }, []);
+
+  const refreshLocalState = async () => {
+    if (!isTauriRuntime()) {
+      setToolStatus({
+        ffmpeg: null,
+        python: null,
+        ollama: null,
+        ollamaModel: "browser-preview",
+        appDataDir: "Tauri runtime required",
+        modelsDir: "Tauri runtime required",
+        logsDir: "Tauri runtime required",
+      });
+      setRecentJobs([]);
+      return;
+    }
+
+    const [environment, jobs] = await Promise.all([
+      invoke<ToolStatus>("check_environment"),
+      invoke<RecentJob[]>("list_recent_jobs"),
+    ]);
+    setToolStatus(environment);
+    setRecentJobs(jobs);
+  };
 
   const selectFile = async () => {
     setError(null);
@@ -207,6 +277,7 @@ function App() {
       });
       setJob(result);
       setStatus(result.status);
+      await refreshLocalState();
     } catch (err) {
       setStatus("failed");
       setError(err instanceof Error ? err.message : String(err));
@@ -288,6 +359,68 @@ function App() {
           <section className="panel panel--subtle">
             <div className="panel-head">
               <div>
+                <p className="eyebrow">Settings</p>
+                <h2>Local tools</h2>
+              </div>
+            </div>
+            <dl className="meta-list">
+              <div>
+                <dt>ffmpeg</dt>
+                <dd>{toolStatus?.ffmpeg ?? "Not found"}</dd>
+              </div>
+              <div>
+                <dt>Python</dt>
+                <dd>{toolStatus?.python ?? "Not found"}</dd>
+              </div>
+              <div>
+                <dt>Ollama</dt>
+                <dd>{toolStatus?.ollama ? `${toolStatus.ollama} / ${toolStatus.ollamaModel}` : "Not running"}</dd>
+              </div>
+              <div>
+                <dt>Models</dt>
+                <dd>{toolStatus?.modelsDir ?? "Unknown"}</dd>
+              </div>
+              <div>
+                <dt>Logs</dt>
+                <dd>{toolStatus?.logsDir ?? "Unknown"}</dd>
+              </div>
+            </dl>
+          </section>
+
+          <section className="panel panel--subtle">
+            <div className="panel-head">
+              <div>
+                <p className="eyebrow">History</p>
+                <h2>Recent jobs</h2>
+              </div>
+            </div>
+            {recentJobs.length ? (
+              <div className="recent-list">
+                {recentJobs.map((recent) => (
+                  <button
+                    className="recent-item"
+                    key={recent.id}
+                    onClick={() => {
+                      if (isTauriRuntime()) {
+                        void invoke("open_path", { path: recent.jobDir });
+                      }
+                    }}
+                    type="button"
+                  >
+                    <strong>{recent.id}</strong>
+                    <span>{recent.status}</span>
+                    <small>{recent.sourcePath}</small>
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <p className="muted-copy">No recent jobs yet</p>
+            )}
+          </section>
+
+          <section className="panel panel--subtle">
+            <div className="panel-head">
+              <div>
                 <p className="eyebrow">Job</p>
                 <h2>Current file</h2>
               </div>
@@ -349,6 +482,24 @@ function App() {
                     label="Energy"
                     value={job.analysis.energy.value}
                     score={job.analysis.energy.confidence}
+                  />
+                </div>
+
+                <div className="integration-strip">
+                  <IntegrationStatus
+                    detail={taggingDetail(job.analysis)}
+                    label="Tagging"
+                    state={taggingState(job.analysis)}
+                  />
+                  <IntegrationStatus
+                    detail={rewriteDetail(job.promptRewrite)}
+                    label="Prompt rewrite"
+                    state={job.promptRewrite.used ? "Ollama" : "Template"}
+                  />
+                  <IntegrationStatus
+                    detail={job.analysis.features?.analysisBackend ?? "heuristic fallback"}
+                    label="Analysis"
+                    state={job.analysis.features?.analysisBackend ?? "unknown"}
                   />
                 </div>
               </section>
@@ -440,6 +591,24 @@ function Metric({ label, value, score }: { label: string; value: string; score: 
   );
 }
 
+function IntegrationStatus({
+  detail,
+  label,
+  state,
+}: {
+  detail: string;
+  label: string;
+  state: string;
+}) {
+  return (
+    <div className="integration-status">
+      <span>{label}</span>
+      <strong>{state}</strong>
+      <small>{detail}</small>
+    </div>
+  );
+}
+
 function TagGroup({ title, children }: { title: string; children: ReactNode }) {
   return (
     <div className="tag-group">
@@ -447,6 +616,30 @@ function TagGroup({ title, children }: { title: string; children: ReactNode }) {
       <div className="pill-list">{children}</div>
     </div>
   );
+}
+
+function taggingState(analysis: Analysis) {
+  const status = analysis.features?.taggingModelStatus;
+  if (!status) return "Heuristic";
+  if (status.available) return "Essentia";
+  if (!status.libraryAvailable) return "Essentia missing";
+  if (status.missing?.length) return "Models missing";
+  return "Heuristic";
+}
+
+function taggingDetail(analysis: Analysis) {
+  const status = analysis.features?.taggingModelStatus;
+  if (!status) return "No model status recorded";
+  if (status.available) return status.modelsDir ?? "Essentia models ready";
+  if (!status.libraryAvailable) return "Python package `essentia` is not installed";
+  if (status.missing?.length) return `${status.missing.length} model files missing`;
+  return "Falling back to local heuristics";
+}
+
+function rewriteDetail(status: PromptRewriteStatus) {
+  if (status.used) return status.model;
+  if (status.error) return status.error;
+  return "Ollama not used";
 }
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(

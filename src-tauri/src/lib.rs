@@ -2,8 +2,11 @@ use chrono::Local;
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
+    io::{Read, Write},
+    net::TcpStream,
     path::{Path, PathBuf},
     process::Command,
+    time::Duration,
 };
 use tauri::{AppHandle, Manager};
 
@@ -45,6 +48,8 @@ impl serde::Serialize for AppError {
 struct ToolStatus {
     ffmpeg: Option<String>,
     python: Option<String>,
+    ollama: Option<String>,
+    ollama_model: String,
     app_data_dir: String,
     models_dir: String,
     logs_dir: String,
@@ -102,6 +107,7 @@ struct JobResult {
     job_dir: String,
     analysis: Analysis,
     prompt: String,
+    prompt_rewrite: PromptRewriteStatus,
 }
 
 #[derive(Serialize)]
@@ -116,12 +122,36 @@ struct JobState<'a> {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct RecentJob {
+    id: String,
+    status: String,
+    source_path: String,
+    job_dir: String,
+    created_at: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct SourceMetadata<'a> {
     original_file_name: String,
     source_path: &'a str,
     extension: String,
     size_bytes: u64,
     duration_seconds: Option<u64>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PromptRewriteStatus {
+    used: bool,
+    backend: &'static str,
+    model: String,
+    error: Option<String>,
+}
+
+struct PromptRewriteResult {
+    prompt: String,
+    status: PromptRewriteStatus,
 }
 
 #[tauri::command]
@@ -136,6 +166,8 @@ fn check_environment(app: AppHandle) -> Result<ToolStatus, AppError> {
         ffmpeg: find_executable("ffmpeg"),
         python: worker_python_path()
             .or_else(|| find_executable("python3").or_else(|| find_executable("python"))),
+        ollama: ollama_endpoint_if_running(),
+        ollama_model: ollama_model(),
         app_data_dir: app_data_dir.display().to_string(),
         models_dir: models_dir.display().to_string(),
         logs_dir: logs_dir.display().to_string(),
@@ -190,7 +222,9 @@ fn run_analysis(app: AppHandle, source_path: String) -> Result<JobResult, AppErr
 
     run_python_worker(&job_dir, &models_dir)?;
     let analysis = read_analysis(&job_dir)?;
-    let prompt = generate_prompt(&analysis);
+    let template_prompt = generate_prompt(&analysis);
+    let prompt_rewrite = rewrite_prompt_with_ollama(&template_prompt);
+    let prompt = prompt_rewrite.prompt;
 
     let job_state = JobState {
         id: &id,
@@ -201,7 +235,9 @@ fn run_analysis(app: AppHandle, source_path: String) -> Result<JobResult, AppErr
     };
 
     write_json(job_dir.join("job.json"), &job_state)?;
+    fs::write(job_dir.join("prompt-template.txt"), &template_prompt)?;
     fs::write(job_dir.join("prompt.txt"), &prompt)?;
+    write_json(job_dir.join("prompt-rewrite.json"), &prompt_rewrite.status)?;
 
     Ok(JobResult {
         id,
@@ -210,6 +246,7 @@ fn run_analysis(app: AppHandle, source_path: String) -> Result<JobResult, AppErr
         job_dir: job_dir.display().to_string(),
         analysis,
         prompt,
+        prompt_rewrite: prompt_rewrite.status,
     })
 }
 
@@ -219,12 +256,64 @@ fn open_path(path: String) -> Result<(), AppError> {
     Ok(())
 }
 
+#[tauri::command]
+fn list_recent_jobs(app: AppHandle) -> Result<Vec<RecentJob>, AppError> {
+    let jobs_dir = app_data_dir(&app)?.join("jobs");
+    if !jobs_dir.is_dir() {
+        return Ok(Vec::new());
+    }
+
+    let mut jobs = Vec::new();
+    for entry in fs::read_dir(jobs_dir)? {
+        let entry = entry?;
+        let job_dir = entry.path();
+        if !job_dir.is_dir() {
+            continue;
+        }
+        let job_json = job_dir.join("job.json");
+        let Ok(body) = fs::read_to_string(job_json) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&body) else {
+            continue;
+        };
+        jobs.push(RecentJob {
+            id: value
+                .get("id")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown")
+                .to_string(),
+            status: value
+                .get("status")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown")
+                .to_string(),
+            source_path: value
+                .get("sourcePath")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown")
+                .to_string(),
+            job_dir: job_dir.display().to_string(),
+            created_at: value
+                .get("createdAt")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .to_string(),
+        });
+    }
+
+    jobs.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+    jobs.truncate(8);
+    Ok(jobs)
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             check_environment,
             run_analysis,
+            list_recent_jobs,
             open_path
         ])
         .run(tauri::generate_context!())
@@ -471,6 +560,148 @@ fn generate_prompt(analysis: &Analysis) -> String {
     }
 
     sanitize_prompt(&sentences.join(" "))
+}
+
+fn rewrite_prompt_with_ollama(template_prompt: &str) -> PromptRewriteResult {
+    let model = ollama_model();
+    let fallback = || PromptRewriteResult {
+        prompt: template_prompt.to_string(),
+        status: PromptRewriteStatus {
+            used: false,
+            backend: "template",
+            model: model.clone(),
+            error: None,
+        },
+    };
+
+    if ollama_endpoint_if_running().is_none() {
+        return fallback();
+    }
+
+    let rewrite_prompt = format!(
+        "Rewrite this music generation prompt into polished English for a music generation tool.\n\
+Keep every concrete musical detail.\n\
+Do not add artist names, song names, lyrics, vocal cloning, or copyrighted references.\n\
+Do not use the phrases in the style of, copy, clone, or replicate.\n\
+Return only the final prompt text.\n\n\
+Prompt:\n{template_prompt}"
+    );
+
+    match ollama_generate(&model, &rewrite_prompt) {
+        Ok(response) => {
+            let rewritten = sanitize_prompt(response.trim());
+            if rewritten.is_empty() {
+                return PromptRewriteResult {
+                    prompt: template_prompt.to_string(),
+                    status: PromptRewriteStatus {
+                        used: false,
+                        backend: "ollama",
+                        model,
+                        error: Some("empty Ollama response".to_string()),
+                    },
+                };
+            }
+            PromptRewriteResult {
+                prompt: rewritten,
+                status: PromptRewriteStatus {
+                    used: true,
+                    backend: "ollama",
+                    model,
+                    error: None,
+                },
+            }
+        }
+        Err(error) => PromptRewriteResult {
+            prompt: template_prompt.to_string(),
+            status: PromptRewriteStatus {
+                used: false,
+                backend: "ollama",
+                model,
+                error: Some(error),
+            },
+        },
+    }
+}
+
+fn ollama_model() -> String {
+    std::env::var("TIMBREPRINT_OLLAMA_MODEL").unwrap_or_else(|_| "qwen2.5:3b".to_string())
+}
+
+fn ollama_endpoint_if_running() -> Option<String> {
+    let stream = TcpStream::connect_timeout(
+        &"127.0.0.1:11434".parse().ok()?,
+        Duration::from_millis(120),
+    )
+    .ok()?;
+    let _ = stream.shutdown(std::net::Shutdown::Both);
+    Some("http://127.0.0.1:11434".to_string())
+}
+
+fn ollama_generate(model: &str, prompt: &str) -> Result<String, String> {
+    let body = serde_json::json!({
+        "model": model,
+        "prompt": prompt,
+        "stream": false,
+        "options": {
+            "temperature": 0.2,
+            "num_predict": 220
+        }
+    })
+    .to_string();
+
+    let mut stream = TcpStream::connect_timeout(
+        &"127.0.0.1:11434"
+            .parse()
+            .map_err(|error| format!("invalid Ollama address: {error}"))?,
+        Duration::from_secs(1),
+    )
+    .map_err(|error| format!("Ollama is not reachable: {error}"))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .map_err(|error| format!("failed to set Ollama read timeout: {error}"))?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .map_err(|error| format!("failed to set Ollama write timeout: {error}"))?;
+
+    let request = format!(
+        "POST /api/generate HTTP/1.1\r\n\
+Host: 127.0.0.1:11434\r\n\
+Content-Type: application/json\r\n\
+Accept: application/json\r\n\
+Connection: close\r\n\
+Content-Length: {}\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|error| format!("failed to write Ollama request: {error}"))?;
+
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .map_err(|error| format!("failed to read Ollama response: {error}"))?;
+    parse_ollama_http_response(&response)
+}
+
+fn parse_ollama_http_response(response: &str) -> Result<String, String> {
+    let (head, body) = response
+        .split_once("\r\n\r\n")
+        .ok_or_else(|| "invalid Ollama HTTP response".to_string())?;
+    if !head.starts_with("HTTP/1.1 200") && !head.starts_with("HTTP/1.0 200") {
+        return Err(format!(
+            "Ollama returned {}",
+            head.lines().next().unwrap_or("an error")
+        ));
+    }
+
+    let value: serde_json::Value =
+        serde_json::from_str(body).map_err(|error| format!("invalid Ollama JSON: {error}"))?;
+    value
+        .get("response")
+        .and_then(|response| response.as_str())
+        .map(|response| response.to_string())
+        .ok_or_else(|| "Ollama response had no `response` field".to_string())
 }
 
 fn join_confident_values(items: &[ScoredValue<String>], minimum_confidence: f32) -> String {
@@ -904,6 +1135,34 @@ mod tests {
 
         assert_prompt_policy(&prompt);
         assert!(prompt.contains("recognizable copyrighted melody"));
+    }
+
+    #[test]
+    fn parses_non_streaming_ollama_generate_response() {
+        let response = concat!(
+            "HTTP/1.1 200 OK\r\n",
+            "Content-Type: application/json\r\n",
+            "\r\n",
+            "{\"response\":\"Rewritten prompt text\",\"done\":true}"
+        );
+
+        let parsed = parse_ollama_http_response(response).expect("parse Ollama response");
+
+        assert_eq!(parsed, "Rewritten prompt text");
+    }
+
+    #[test]
+    fn rejects_ollama_error_response() {
+        let response = concat!(
+            "HTTP/1.1 404 Not Found\r\n",
+            "Content-Type: application/json\r\n",
+            "\r\n",
+            "{\"error\":\"model not found\"}"
+        );
+
+        let error = parse_ollama_http_response(response).expect_err("reject non-200 response");
+
+        assert!(error.contains("404"));
     }
 
     fn assert_prompt_policy(prompt: &str) {

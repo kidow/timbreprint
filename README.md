@@ -10,13 +10,13 @@ The first MVP focuses on the analysis and prompt workflow, not on generating new
 - Lets you select `mp3`, `wav`, `m4a`, or `flac` files.
 - Keeps the MVP input scope to files up to 10 minutes.
 - Creates a local job directory for each analysis run.
-- Writes `job.json`, `source-metadata.json`, `analysis.json`, `prompt.txt`, and `processed.wav`.
+- Writes `job.json`, `source-metadata.json`, `analysis.json`, `prompt-template.txt`, `prompt-rewrite.json`, `prompt.txt`, and `processed.wav`.
 - Shows tempo, key, energy, genre, mood, instruments, texture, and confidence labels.
 - Generates an English prompt from a deterministic template.
 
 ## Current Status
 
-This repo is in the first scaffolded MVP stage.
+This repo is in the local analysis and prompt extraction MVP stage.
 
 Implemented:
 
@@ -28,13 +28,16 @@ Implemented:
 - Rust commands for local job creation
 - Real `ffmpeg` conversion to `processed.wav`
 - Python worker analysis using standard-library WAV feature extraction
+- Optional `librosa` feature extraction
+- Optional Essentia tagging model detection and inference
+- Optional Ollama prompt rewrite
+- Local tool status panel
+- Recent job list
 - JSON and prompt file output
+- Prompt safety sanitizer and tests
 
 Not implemented yet:
 
-- `librosa` analysis
-- Audio tagging models
-- Ollama or local LLM prompt rewriting
 - MusicGen or other local music generation
 - App packaging and signing
 
@@ -50,6 +53,8 @@ Optional for later MVP steps:
 - `ffmpeg`
 - `python3`
 - Python packages in `workers/requirements.txt` for better audio analysis
+- Optional Essentia model files, documented in `docs/local-model-setup.md`
+- Optional Ollama model for prompt rewriting
 
 ## Install
 
@@ -130,6 +135,8 @@ jobs/
     source-metadata.json
     processed.wav
     analysis.json
+    prompt-template.txt
+    prompt-rewrite.json
     prompt.txt
 ```
 
@@ -141,5 +148,9 @@ jobs/
 - Key, genre, mood, and instrument labels are still heuristic and low-confidence until model-based tagging is added.
 - Confidence is stored as a `0-1` number in JSON and shown as low, medium, or high in the UI.
 - The generated prompt is English-only for now.
+- If Ollama is running on `127.0.0.1:11434`, Timbreprint rewrites the template prompt through `/api/generate` with `stream: false`; set `TIMBREPRINT_OLLAMA_MODEL` to override the default `qwen2.5:3b` model.
+- Jobs keep `prompt-template.txt`, final `prompt.txt`, and `prompt-rewrite.json` so fallback or rewrite behavior is auditable.
 - Prompt generation avoids direct artist, song, copy, clone, and replication language.
 - `librosa` or model-based audio analysis should be added after the file/job/prompt contract stays stable.
+
+See [docs/local-model-setup.md](docs/local-model-setup.md) for optional Essentia and Ollama setup.
