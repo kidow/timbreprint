@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Standard-library audio worker for the first Timbreprint MVP flow."""
+"""Audio analysis worker for the first Timbreprint MVP flow."""
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import math
 import statistics
@@ -14,8 +15,71 @@ from pathlib import Path
 FRAME_SIZE = 2048
 
 
-def scored(value: str | int, confidence: float) -> dict[str, str | int | float]:
+def scored(value: str | int | float, confidence: float) -> dict[str, str | int | float]:
     return {"value": value, "confidence": round(confidence, 2)}
+
+
+def optional_librosa_available() -> bool:
+    return bool(importlib.util.find_spec("librosa") and importlib.util.find_spec("numpy"))
+
+
+def analyze_with_librosa(path: Path) -> dict[str, object] | None:
+    if not optional_librosa_available():
+        return None
+
+    import librosa
+    import numpy as np
+
+    y, sample_rate = librosa.load(path, sr=44100, mono=True)
+    if y.size == 0:
+        raise ValueError("processed WAV has no samples")
+
+    duration = float(librosa.get_duration(y=y, sr=sample_rate))
+    tempo_raw, _beats = librosa.beat.beat_track(y=y, sr=sample_rate)
+    tempo = int(round(float(np.asarray(tempo_raw).reshape(-1)[0]))) if np.size(tempo_raw) else 0
+    rms = float(np.mean(librosa.feature.rms(y=y)[0]))
+    zero_cross_rate = float(np.mean(librosa.feature.zero_crossing_rate(y)[0]))
+    spectral_centroid = float(np.mean(librosa.feature.spectral_centroid(y=y, sr=sample_rate)[0]))
+    onset_env = librosa.onset.onset_strength(y=y, sr=sample_rate)
+    onset_density = float(np.mean(onset_env)) if onset_env.size else 0.0
+    key, key_confidence = estimate_key(y, sample_rate, librosa, np)
+
+    energy, energy_confidence = classify_energy(rms)
+    texture = classify_texture(zero_cross_rate, rms, spectral_centroid)
+    mood = classify_mood(energy, texture[0]["value"], tempo)
+    genre = classify_genre(energy, texture[0]["value"], tempo)
+    instruments = classify_instruments(texture[0]["value"], energy)
+
+    return {
+        "tempo": scored(tempo, 0.7 if tempo > 0 else 0.15),
+        "key": scored(key, key_confidence),
+        "energy": scored(energy, energy_confidence),
+        "mood": mood,
+        "genre": genre,
+        "instruments": instruments,
+        "texture": texture,
+        "features": {
+            "analysisBackend": "librosa",
+            "durationSeconds": round(duration, 2),
+            "rms": round(rms, 4),
+            "zeroCrossingRate": round(zero_cross_rate, 4),
+            "spectralCentroidHz": round(spectral_centroid, 2),
+            "onsetDensity": round(onset_density, 4),
+        },
+    }
+
+
+def estimate_key(y, sample_rate: int, librosa, np) -> tuple[str, float]:
+    chroma = librosa.feature.chroma_cqt(y=y, sr=sample_rate)
+    if chroma.size == 0:
+        return "unknown", 0.1
+
+    pitch_profile = np.mean(chroma, axis=1)
+    pitch_index = int(np.argmax(pitch_profile))
+    pitch_names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+    total = float(np.sum(pitch_profile))
+    confidence = 0.15 if total == 0 else min(0.55, float(pitch_profile[pitch_index] / total) * 3)
+    return f"{pitch_names[pitch_index]} tonal center", confidence
 
 
 def iter_mono_chunks(path: Path):
@@ -87,6 +151,7 @@ def analyze_wav(path: Path) -> dict[str, object]:
         "instruments": instruments,
         "texture": texture,
         "features": {
+            "analysisBackend": "stdlib-wave",
             "durationSeconds": round(duration, 2),
             "rms": round(rms, 4),
             "zeroCrossingRate": round(zero_cross_rate, 4),
@@ -141,8 +206,16 @@ def classify_energy(rms: float) -> tuple[str, float]:
     return "high", 0.75
 
 
-def classify_texture(zero_cross_rate: float, rms: float) -> list[dict[str, str | float]]:
-    if zero_cross_rate < 0.04:
+def classify_texture(
+    zero_cross_rate: float,
+    rms: float,
+    spectral_centroid: float | None = None,
+) -> list[dict[str, str | float]]:
+    if spectral_centroid is not None and spectral_centroid > 3200:
+        primary = "bright"
+    elif spectral_centroid is not None and spectral_centroid < 1400:
+        primary = "smooth"
+    elif zero_cross_rate < 0.04:
         primary = "smooth"
     elif zero_cross_rate < 0.1:
         primary = "balanced"
@@ -191,7 +264,7 @@ def main() -> int:
         return 1
 
     try:
-        analysis = analyze_wav(processed_path)
+        analysis = analyze_with_librosa(processed_path) or analyze_wav(processed_path)
     except Exception as exc:
         print(f"failed to analyze audio: {exc}", file=sys.stderr)
         return 1

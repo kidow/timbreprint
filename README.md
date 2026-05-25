@@ -49,11 +49,18 @@ Optional for later MVP steps:
 
 - `ffmpeg`
 - `python3`
+- Python packages in `workers/requirements.txt` for better audio analysis
 
 ## Install
 
 ```bash
 pnpm install
+```
+
+Optional Python analysis dependencies:
+
+```bash
+python3 -m pip install -r workers/requirements.txt
 ```
 
 ## Start The Web Preview
@@ -120,6 +127,7 @@ jobs/
 ## Development Notes
 
 - The current analysis uses real WAV samples for basic tempo, energy, and texture heuristics.
+- If `librosa` and `numpy` are installed, the worker uses them for stronger tempo, spectral, onset, and tonal-center analysis.
 - Key, genre, mood, and instrument labels are still heuristic and low-confidence until model-based tagging is added.
 - Confidence is stored as a `0-1` number in JSON and shown as low, medium, or high in the UI.
 - The generated prompt is English-only for now.
