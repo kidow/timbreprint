@@ -13,6 +13,36 @@ import wave
 from pathlib import Path
 
 FRAME_SIZE = 2048
+ESSENTIA_MODEL_FILES = {
+    "embedding": "discogs_label_embeddings-effnet-bs64-1.pb",
+    "genre": "mtg_jamendo_genre-discogs_label_embeddings-effnet-1.pb",
+    "genreMetadata": "mtg_jamendo_genre-discogs_label_embeddings-effnet-1.json",
+    "moodTheme": "mtg_jamendo_moodtheme-discogs_label_embeddings-effnet-1.pb",
+    "moodThemeMetadata": "mtg_jamendo_moodtheme-discogs_label_embeddings-effnet-1.json",
+    "instrument": "mtg_jamendo_instrument-discogs_label_embeddings-effnet-1.pb",
+    "instrumentMetadata": "mtg_jamendo_instrument-discogs_label_embeddings-effnet-1.json",
+    "voiceInstrumental": "voice_instrumental-discogs-effnet-1.pb",
+    "voiceInstrumentalMetadata": "voice_instrumental-discogs-effnet-1.json",
+}
+
+ESSENTIA_CLASSIFIERS = {
+    "genre": (
+        "mtg_jamendo_genre-discogs_label_embeddings-effnet-1.pb",
+        "mtg_jamendo_genre-discogs_label_embeddings-effnet-1.json",
+    ),
+    "mood": (
+        "mtg_jamendo_moodtheme-discogs_label_embeddings-effnet-1.pb",
+        "mtg_jamendo_moodtheme-discogs_label_embeddings-effnet-1.json",
+    ),
+    "instruments": (
+        "mtg_jamendo_instrument-discogs_label_embeddings-effnet-1.pb",
+        "mtg_jamendo_instrument-discogs_label_embeddings-effnet-1.json",
+    ),
+    "voice": (
+        "voice_instrumental-discogs-effnet-1.pb",
+        "voice_instrumental-discogs-effnet-1.json",
+    ),
+}
 
 
 def scored(value: str | int | float, confidence: float) -> dict[str, str | int | float]:
@@ -23,7 +53,143 @@ def optional_librosa_available() -> bool:
     return bool(importlib.util.find_spec("librosa") and importlib.util.find_spec("numpy"))
 
 
-def analyze_with_librosa(path: Path) -> dict[str, object] | None:
+def optional_essentia_available() -> bool:
+    return bool(importlib.util.find_spec("essentia"))
+
+
+def essentia_model_status(models_dir: Path | None) -> dict[str, object]:
+    if models_dir is None:
+        return {
+            "available": False,
+            "libraryAvailable": optional_essentia_available(),
+            "modelsDir": None,
+            "missing": list(ESSENTIA_MODEL_FILES.values()),
+        }
+
+    missing = [
+        filename
+        for filename in ESSENTIA_MODEL_FILES.values()
+        if not (models_dir / "essentia" / filename).is_file()
+    ]
+    return {
+        "available": optional_essentia_available() and not missing,
+        "libraryAvailable": optional_essentia_available(),
+        "modelsDir": str(models_dir / "essentia"),
+        "missing": missing,
+    }
+
+
+def merge_model_tags(analysis: dict[str, object], path: Path, models_dir: Path | None) -> dict[str, object]:
+    status = essentia_model_status(models_dir)
+    features = analysis.setdefault("features", {})
+    if isinstance(features, dict):
+        features["taggingModelStatus"] = status
+
+    if not status["available"] or models_dir is None:
+        return analysis
+
+    try:
+        model_tags = run_essentia_tagging(path, models_dir / "essentia")
+    except Exception as exc:
+        status["available"] = False
+        status["error"] = str(exc)
+        return analysis
+
+    if model_tags.get("genre"):
+        analysis["genre"] = model_tags["genre"]
+    if model_tags.get("mood"):
+        analysis["mood"] = model_tags["mood"]
+    if model_tags.get("instruments"):
+        analysis["instruments"] = model_tags["instruments"]
+    if model_tags.get("voice"):
+        analysis["texture"] = merge_scored_values(
+            analysis.get("texture", []),
+            model_tags["voice"],
+            limit=4,
+        )
+
+    if isinstance(features, dict):
+        features["analysisBackend"] = f"{features.get('analysisBackend', 'audio')}+essentia-effnet"
+    return analysis
+
+
+def run_essentia_tagging(path: Path, model_dir: Path) -> dict[str, list[dict[str, str | float]]]:
+    from essentia.standard import MonoLoader, TensorflowPredict2D, TensorflowPredictEffnetDiscogs
+    import numpy as np
+
+    audio = MonoLoader(filename=str(path), sampleRate=16000, resampleQuality=4)()
+    embedding_model = TensorflowPredictEffnetDiscogs(
+        graphFilename=str(model_dir / ESSENTIA_MODEL_FILES["embedding"]),
+        output="PartitionedCall:1",
+    )
+    embeddings = embedding_model(audio)
+
+    output: dict[str, list[dict[str, str | float]]] = {}
+    for target, (model_name, metadata_name) in ESSENTIA_CLASSIFIERS.items():
+        model = TensorflowPredict2D(graphFilename=str(model_dir / model_name))
+        predictions = model(embeddings)
+        scores = np.mean(np.asarray(predictions, dtype=float), axis=0).tolist()
+        labels = load_essentia_labels(model_dir / metadata_name)
+        output[target] = top_scored_labels(labels, scores)
+
+    return output
+
+
+def load_essentia_labels(path: Path) -> list[str]:
+    metadata = json.loads(path.read_text(encoding="utf-8"))
+    labels = (
+        metadata.get("classes")
+        or metadata.get("class_names")
+        or metadata.get("tags")
+        or metadata.get("labels")
+    )
+    if isinstance(labels, dict):
+        labels = list(labels.values())
+    if not isinstance(labels, list):
+        raise ValueError(f"metadata has no class labels: {path}")
+    return [normalize_essentia_label(str(label)) for label in labels]
+
+
+def normalize_essentia_label(label: str) -> str:
+    value = label.strip().lower()
+    if "---" in value:
+        value = value.split("---", 1)[1]
+    value = value.replace("_", " ").replace("-", " ")
+    return " ".join(value.split())
+
+
+def top_scored_labels(
+    labels: list[str],
+    scores: list[float],
+    limit: int = 4,
+    minimum_confidence: float = 0.12,
+) -> list[dict[str, str | float]]:
+    paired = [
+        (label, float(score))
+        for label, score in zip(labels, scores)
+        if label and float(score) >= minimum_confidence
+    ]
+    paired.sort(key=lambda item: item[1], reverse=True)
+    return [scored(label, confidence) for label, confidence in paired[:limit]]
+
+
+def merge_scored_values(
+    existing: object,
+    incoming: list[dict[str, str | float]],
+    limit: int,
+) -> list[dict[str, str | float]]:
+    merged: dict[str, dict[str, str | float]] = {}
+    if isinstance(existing, list):
+        for item in existing:
+            if isinstance(item, dict) and isinstance(item.get("value"), str):
+                merged[str(item["value"])] = item
+    for item in incoming:
+        if isinstance(item.get("value"), str):
+            merged[str(item["value"])] = item
+    return list(merged.values())[:limit]
+
+
+def analyze_with_librosa(path: Path, models_dir: Path | None = None) -> dict[str, object] | None:
     if not optional_librosa_available():
         return None
 
@@ -56,7 +222,12 @@ def analyze_with_librosa(path: Path) -> dict[str, object] | None:
     arrangement = classify_arrangement(energy, rhythm[0]["value"], duration)
     negative_prompt = classify_negative_prompt(brightness[0]["value"], energy)
 
-    return {
+    backend = "librosa"
+    model_status = essentia_model_status(models_dir)
+    if model_status["available"]:
+        backend = "librosa+essentia-ready"
+
+    analysis = {
         "tempo": scored(tempo, 0.7 if tempo > 0 else 0.15),
         "key": scored(key, key_confidence),
         "energy": scored(energy, energy_confidence),
@@ -71,14 +242,16 @@ def analyze_with_librosa(path: Path) -> dict[str, object] | None:
         "arrangement": arrangement,
         "negativePrompt": negative_prompt,
         "features": {
-            "analysisBackend": "librosa",
+            "analysisBackend": backend,
             "durationSeconds": round(duration, 2),
             "rms": round(rms, 4),
             "zeroCrossingRate": round(zero_cross_rate, 4),
             "spectralCentroidHz": round(spectral_centroid, 2),
             "onsetDensity": round(onset_density, 4),
+            "taggingModelStatus": model_status,
         },
     }
+    return merge_model_tags(analysis, path, models_dir)
 
 
 def estimate_key(y, sample_rate: int, librosa, np) -> tuple[str, float]:
@@ -118,7 +291,7 @@ def iter_mono_chunks(path: Path):
             yield mono, sample_rate, total_frames
 
 
-def analyze_wav(path: Path) -> dict[str, object]:
+def analyze_wav(path: Path, models_dir: Path | None = None) -> dict[str, object]:
     sample_rate = 44100
     total_frames = 0
     total_samples = 0
@@ -160,7 +333,7 @@ def analyze_wav(path: Path) -> dict[str, object]:
     arrangement = classify_arrangement(energy, rhythm[0]["value"], duration)
     negative_prompt = classify_negative_prompt(brightness[0]["value"], energy)
 
-    return {
+    analysis = {
         "tempo": scored(tempo, tempo_confidence),
         "key": scored("unknown", 0.1),
         "energy": scored(energy, energy_confidence),
@@ -179,8 +352,10 @@ def analyze_wav(path: Path) -> dict[str, object]:
             "durationSeconds": round(duration, 2),
             "rms": round(rms, 4),
             "zeroCrossingRate": round(zero_cross_rate, 4),
+            "taggingModelStatus": essentia_model_status(models_dir),
         },
     }
+    return merge_model_tags(analysis, path, models_dir)
 
 
 def estimate_tempo(energies: list[float], sample_rate: int) -> tuple[int, float]:
@@ -363,18 +538,22 @@ def classify_negative_prompt(
 
 
 def main() -> int:
-    if len(sys.argv) != 2:
-        print("usage: audio_analysis.py <job-dir>", file=sys.stderr)
+    if len(sys.argv) not in {2, 3}:
+        print("usage: audio_analysis.py <job-dir> [models-dir]", file=sys.stderr)
         return 2
 
     job_dir = Path(sys.argv[1])
+    models_dir = Path(sys.argv[2]) if len(sys.argv) == 3 else None
     processed_path = job_dir / "processed.wav"
     if not processed_path.exists():
         print(f"missing processed audio: {processed_path}", file=sys.stderr)
         return 1
 
     try:
-        analysis = analyze_with_librosa(processed_path) or analyze_wav(processed_path)
+        analysis = analyze_with_librosa(processed_path, models_dir) or analyze_wav(
+            processed_path,
+            models_dir,
+        )
     except Exception as exc:
         print(f"failed to analyze audio: {exc}", file=sys.stderr)
         return 1

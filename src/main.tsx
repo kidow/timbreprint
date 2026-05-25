@@ -51,6 +51,12 @@ type Analysis = {
     zeroCrossingRate?: number;
     spectralCentroidHz?: number;
     onsetDensity?: number;
+    taggingModelStatus?: {
+      available?: boolean;
+      libraryAvailable?: boolean;
+      modelsDir?: string | null;
+      missing?: string[];
+    };
   };
 };
 

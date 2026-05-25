@@ -63,15 +63,44 @@ needed for the next MVP increment.
 ## Next Integration Plan
 
 1. Add an optional `essentia` dependency path that does not break the existing
-   `librosa`/stdlib fallback.
+   `librosa`/stdlib fallback. Done: the worker now records availability without
+   requiring Essentia at runtime.
 2. Add a local model directory under the app data directory, not committed to
-   Git.
-3. Implement a small model availability check in the Python worker.
+   Git. Done: Tauri passes the app data `models` directory into the Python
+   worker.
+3. Implement a small model availability check in the Python worker. Done:
+   `features.taggingModelStatus` records library availability, expected model
+   path, and missing model files.
 4. Run genre, mood/theme, instrument, and voice/instrumental classifiers when
-   model files exist.
-5. Merge classifier results into `analysis.json` with confidence scores.
+   model files exist. Done: the worker calls Essentia's EffNet embedding model
+   and TensorflowPredict2D classifiers when all required files are present.
+5. Merge classifier results into `analysis.json` with confidence scores. Done:
+   model tags replace heuristic `genre`, `mood`, and `instruments`, while
+   voice/instrumental tags are merged into `texture`.
 6. Add tests around model-output normalization using fixture JSON, without
-   requiring model downloads during unit tests.
+   requiring model downloads during unit tests. Done: `workers/test_audio_analysis.py`
+   covers metadata normalization, top-score selection, and required metadata
+   detection.
+
+## Model Directory
+
+Place optional Essentia files under:
+
+```text
+~/Library/Application Support/Timbreprint/models/essentia/
+```
+
+Required files:
+
+- `discogs_label_embeddings-effnet-bs64-1.pb`
+- `mtg_jamendo_genre-discogs_label_embeddings-effnet-1.pb`
+- `mtg_jamendo_genre-discogs_label_embeddings-effnet-1.json`
+- `mtg_jamendo_moodtheme-discogs_label_embeddings-effnet-1.pb`
+- `mtg_jamendo_moodtheme-discogs_label_embeddings-effnet-1.json`
+- `mtg_jamendo_instrument-discogs_label_embeddings-effnet-1.pb`
+- `mtg_jamendo_instrument-discogs_label_embeddings-effnet-1.json`
+- `voice_instrumental-discogs-effnet-1.pb`
+- `voice_instrumental-discogs-effnet-1.json`
 
 ## Sources
 

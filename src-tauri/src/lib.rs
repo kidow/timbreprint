@@ -46,6 +46,7 @@ struct ToolStatus {
     ffmpeg: Option<String>,
     python: Option<String>,
     app_data_dir: String,
+    models_dir: String,
     logs_dir: String,
 }
 
@@ -89,6 +90,7 @@ struct AnalysisFeatures {
     zero_crossing_rate: Option<f32>,
     spectral_centroid_hz: Option<f32>,
     onset_density: Option<f32>,
+    tagging_model_status: Option<serde_json::Value>,
 }
 
 #[derive(Serialize)]
@@ -126,13 +128,16 @@ struct SourceMetadata<'a> {
 fn check_environment(app: AppHandle) -> Result<ToolStatus, AppError> {
     let app_data_dir = app_data_dir(&app)?;
     let logs_dir = app_data_dir.join("logs");
+    let models_dir = app_data_dir.join("models");
     fs::create_dir_all(&logs_dir)?;
+    fs::create_dir_all(&models_dir)?;
 
     Ok(ToolStatus {
         ffmpeg: find_executable("ffmpeg"),
         python: worker_python_path()
             .or_else(|| find_executable("python3").or_else(|| find_executable("python"))),
         app_data_dir: app_data_dir.display().to_string(),
+        models_dir: models_dir.display().to_string(),
         logs_dir: logs_dir.display().to_string(),
     })
 }
@@ -149,7 +154,9 @@ fn run_analysis(app: AppHandle, source_path: String) -> Result<JobResult, AppErr
 
     let app_data_dir = app_data_dir(&app)?;
     let jobs_dir = app_data_dir.join("jobs");
+    let models_dir = app_data_dir.join("models");
     fs::create_dir_all(&jobs_dir)?;
+    fs::create_dir_all(&models_dir)?;
 
     let file_stem = source
         .file_stem()
@@ -181,7 +188,7 @@ fn run_analysis(app: AppHandle, source_path: String) -> Result<JobResult, AppErr
     };
     write_json(job_dir.join("source-metadata.json"), &source_metadata)?;
 
-    run_python_worker(&job_dir)?;
+    run_python_worker(&job_dir, &models_dir)?;
     let analysis = read_analysis(&job_dir)?;
     let prompt = generate_prompt(&analysis);
 
@@ -310,7 +317,7 @@ fn convert_to_wav(source: &Path, output_path: &Path, job_dir: &Path) -> Result<(
     Ok(())
 }
 
-fn run_python_worker(job_dir: &Path) -> Result<(), AppError> {
+fn run_python_worker(job_dir: &Path, models_dir: &Path) -> Result<(), AppError> {
     let python = worker_python_path()
         .or_else(|| find_executable("python3").or_else(|| find_executable("python")))
         .ok_or(AppError::MissingPython)?;
@@ -319,6 +326,7 @@ fn run_python_worker(job_dir: &Path) -> Result<(), AppError> {
     let output = Command::new(python)
         .arg(worker_path)
         .arg(job_dir)
+        .arg(models_dir)
         .output()?;
 
     let log_path = job_dir.join("worker.log");
@@ -693,7 +701,7 @@ mod tests {
             .expect("generate processed wav");
         assert!(generated.success());
 
-        run_python_worker(&test_dir).expect("run python worker");
+        run_python_worker(&test_dir, &test_dir.join("models")).expect("run python worker");
         let analysis = read_analysis(&test_dir).expect("read analysis");
 
         assert!(matches!(
@@ -774,6 +782,7 @@ mod tests {
                 zero_crossing_rate: Some(0.01),
                 spectral_centroid_hz: Some(900.0),
                 onset_density: Some(0.03),
+                tagging_model_status: None,
             }),
         };
 

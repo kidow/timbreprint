@@ -137,6 +137,7 @@ jobs/
 
 - The current analysis uses real WAV samples for basic tempo, energy, and texture heuristics.
 - If `librosa` and `numpy` are installed, the worker uses them for stronger tempo, spectral, onset, and tonal-center analysis.
+- The worker checks the local app data `models/essentia` directory for optional Essentia tagging models, records availability in `features.taggingModelStatus`, and uses them for genre, mood, instrument, and voice/instrumental tags when all files are present.
 - Key, genre, mood, and instrument labels are still heuristic and low-confidence until model-based tagging is added.
 - Confidence is stored as a `0-1` number in JSON and shown as low, medium, or high in the UI.
 - The generated prompt is English-only for now.
