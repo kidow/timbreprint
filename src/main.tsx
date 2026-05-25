@@ -122,7 +122,7 @@ function App() {
     }
   };
 
-  const runMockAnalysis = async () => {
+  const runAnalysis = async () => {
     if (!selectedPath) return;
 
     setError(null);
@@ -130,13 +130,13 @@ function App() {
 
     try {
       if (!isTauriRuntime()) {
-        const result = createBrowserMockJob(selectedPath);
+        const result = createBrowserPreviewJob(selectedPath);
         setJob(result);
         setStatus(result.status);
         return;
       }
 
-      const result = await invoke<JobResult>("run_mock_analysis", {
+      const result = await invoke<JobResult>("run_analysis", {
         sourcePath: selectedPath,
       });
       setJob(result);
@@ -148,7 +148,7 @@ function App() {
     }
 };
 
-const createBrowserMockJob = (sourcePath: string): JobResult => {
+const createBrowserPreviewJob = (sourcePath: string): JobResult => {
   const analysis: Analysis = {
     tempo: { value: 92, confidence: 0.8 },
     key: { value: "A minor", confidence: 0.6 },
@@ -222,9 +222,9 @@ const createBrowserMockJob = (sourcePath: string): JobResult => {
           {selectedPath ? <p className="selected-path">{selectedPath}</p> : null}
 
           <div className="actions">
-            <button disabled={!selectedPath || status === "preprocessing"} onClick={runMockAnalysis}>
+            <button disabled={!selectedPath || status === "preprocessing"} onClick={runAnalysis}>
               {status === "preprocessing" ? <Loader2 className="spin" size={16} /> : <Terminal size={16} />}
-              Mock 분석 실행
+              분석 실행
             </button>
             <StatusBadge status={status} />
           </div>

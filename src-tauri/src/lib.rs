@@ -1,5 +1,5 @@
 use chrono::Local;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -13,6 +13,16 @@ enum AppError {
     UnsupportedFormat(String),
     #[error("audio file is larger than the MVP limit of 10 minutes")]
     TooLong,
+    #[error("ffmpeg was not found. Install ffmpeg or add it to PATH.")]
+    MissingFfmpeg,
+    #[error("ffmpeg conversion failed: {0}")]
+    FfmpegFailed(String),
+    #[error("python was not found. Install python3 or add it to PATH.")]
+    MissingPython,
+    #[error("python worker was not found: {0}")]
+    MissingWorker(String),
+    #[error("python worker failed: {0}")]
+    WorkerFailed(String),
     #[error("failed to prepare job directory: {0}")]
     Io(#[from] std::io::Error),
     #[error("failed to serialize JSON: {0}")]
@@ -39,21 +49,21 @@ struct ToolStatus {
     logs_dir: String,
 }
 
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 struct ScoredValue<T> {
     value: T,
     confidence: f32,
 }
 
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 struct Analysis {
     tempo: ScoredValue<u16>,
-    key: ScoredValue<&'static str>,
-    energy: ScoredValue<&'static str>,
-    mood: Vec<ScoredValue<&'static str>>,
-    genre: Vec<ScoredValue<&'static str>>,
-    instruments: Vec<ScoredValue<&'static str>>,
-    texture: Vec<ScoredValue<&'static str>>,
+    key: ScoredValue<String>,
+    energy: ScoredValue<String>,
+    mood: Vec<ScoredValue<String>>,
+    genre: Vec<ScoredValue<String>>,
+    instruments: Vec<ScoredValue<String>>,
+    texture: Vec<ScoredValue<String>>,
 }
 
 #[derive(Serialize)]
@@ -102,7 +112,7 @@ fn check_environment(app: AppHandle) -> Result<ToolStatus, AppError> {
 }
 
 #[tauri::command]
-fn run_mock_analysis(app: AppHandle, source_path: String) -> Result<JobResult, AppError> {
+fn run_analysis(app: AppHandle, source_path: String) -> Result<JobResult, AppError> {
     validate_audio_path(&source_path)?;
 
     let source = PathBuf::from(&source_path);
@@ -125,10 +135,7 @@ fn run_mock_analysis(app: AppHandle, source_path: String) -> Result<JobResult, A
     fs::create_dir_all(&job_dir)?;
 
     let processed_path = job_dir.join("processed.wav");
-    write_placeholder_wav(&processed_path)?;
-
-    let analysis = mock_analysis();
-    let prompt = generate_prompt(&analysis);
+    convert_to_wav(&source, &processed_path, &job_dir)?;
 
     let metadata = fs::metadata(&source)?;
     let source_metadata = SourceMetadata {
@@ -146,6 +153,11 @@ fn run_mock_analysis(app: AppHandle, source_path: String) -> Result<JobResult, A
         size_bytes: metadata.len(),
         duration_seconds,
     };
+    write_json(job_dir.join("source-metadata.json"), &source_metadata)?;
+
+    run_python_worker(&job_dir)?;
+    let analysis = read_analysis(&job_dir)?;
+    let prompt = generate_prompt(&analysis);
 
     let job_state = JobState {
         id: &id,
@@ -155,8 +167,6 @@ fn run_mock_analysis(app: AppHandle, source_path: String) -> Result<JobResult, A
         created_at: Local::now().to_rfc3339(),
     };
 
-    write_json(job_dir.join("source-metadata.json"), &source_metadata)?;
-    write_json(job_dir.join("analysis.json"), &analysis)?;
     write_json(job_dir.join("job.json"), &job_state)?;
     fs::write(job_dir.join("prompt.txt"), &prompt)?;
 
@@ -181,7 +191,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             check_environment,
-            run_mock_analysis,
+            run_analysis,
             open_path
         ])
         .run(tauri::generate_context!())
@@ -241,7 +251,85 @@ fn probe_duration_seconds(path: &Path) -> Option<u64> {
     }
 
     let value = String::from_utf8(output.stdout).ok()?;
-    value.trim().parse::<f64>().ok().map(|seconds| seconds.ceil() as u64)
+    value
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .map(|seconds| seconds.ceil() as u64)
+}
+
+fn convert_to_wav(source: &Path, output_path: &Path, job_dir: &Path) -> Result<(), AppError> {
+    let ffmpeg = find_executable("ffmpeg").ok_or(AppError::MissingFfmpeg)?;
+    let output = Command::new(ffmpeg)
+        .args(["-y", "-v", "error", "-i"])
+        .arg(source)
+        .args(["-vn", "-ac", "2", "-ar", "44100"])
+        .arg(output_path)
+        .output()?;
+
+    let log_path = job_dir.join("ffmpeg.log");
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let log_body = format!("stdout:\n{stdout}\n\nstderr:\n{stderr}\n");
+    fs::write(log_path, log_body)?;
+
+    if !output.status.success() {
+        return Err(AppError::FfmpegFailed(if stderr.is_empty() {
+            "unknown ffmpeg error".to_string()
+        } else {
+            stderr
+        }));
+    }
+
+    Ok(())
+}
+
+fn run_python_worker(job_dir: &Path) -> Result<(), AppError> {
+    let python = find_executable("python3")
+        .or_else(|| find_executable("python"))
+        .ok_or(AppError::MissingPython)?;
+    let worker_path = worker_script_path()?;
+
+    let output = Command::new(python)
+        .arg(worker_path)
+        .arg(job_dir)
+        .output()?;
+
+    let log_path = job_dir.join("worker.log");
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let log_body = format!("stdout:\n{stdout}\n\nstderr:\n{stderr}\n");
+    fs::write(log_path, log_body)?;
+
+    if !output.status.success() {
+        return Err(AppError::WorkerFailed(if stderr.is_empty() {
+            "unknown worker error".to_string()
+        } else {
+            stderr
+        }));
+    }
+
+    Ok(())
+}
+
+fn worker_script_path() -> Result<PathBuf, AppError> {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../workers/audio_analysis.py")
+        .canonicalize()
+        .map_err(|_| {
+            AppError::MissingWorker(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../workers/audio_analysis.py")
+                    .display()
+                    .to_string(),
+            )
+        })?;
+    Ok(path)
+}
+
+fn read_analysis(job_dir: &Path) -> Result<Analysis, AppError> {
+    let body = fs::read_to_string(job_dir.join("analysis.json"))?;
+    Ok(serde_json::from_str(&body)?)
 }
 
 fn sanitize_name(value: &str) -> String {
@@ -257,75 +345,6 @@ fn sanitize_name(value: &str) -> String {
         .collect::<String>();
     output.truncate(40);
     output.trim_matches('-').to_string()
-}
-
-fn mock_analysis() -> Analysis {
-    Analysis {
-        tempo: ScoredValue {
-            value: 92,
-            confidence: 0.8,
-        },
-        key: ScoredValue {
-            value: "A minor",
-            confidence: 0.6,
-        },
-        energy: ScoredValue {
-            value: "medium",
-            confidence: 0.7,
-        },
-        mood: vec![
-            ScoredValue {
-                value: "melancholic",
-                confidence: 0.8,
-            },
-            ScoredValue {
-                value: "warm",
-                confidence: 0.7,
-            },
-            ScoredValue {
-                value: "hopeful",
-                confidence: 0.6,
-            },
-        ],
-        genre: vec![
-            ScoredValue {
-                value: "indie electronic",
-                confidence: 0.7,
-            },
-            ScoredValue {
-                value: "ambient pop",
-                confidence: 0.6,
-            },
-        ],
-        instruments: vec![
-            ScoredValue {
-                value: "analog synth",
-                confidence: 0.6,
-            },
-            ScoredValue {
-                value: "soft drums",
-                confidence: 0.6,
-            },
-            ScoredValue {
-                value: "bass pad",
-                confidence: 0.5,
-            },
-        ],
-        texture: vec![
-            ScoredValue {
-                value: "spacious",
-                confidence: 0.7,
-            },
-            ScoredValue {
-                value: "reverb-heavy",
-                confidence: 0.7,
-            },
-            ScoredValue {
-                value: "intimate",
-                confidence: 0.6,
-            },
-        ],
-    }
 }
 
 fn generate_prompt(analysis: &Analysis) -> String {
@@ -346,10 +365,10 @@ fn generate_prompt(analysis: &Analysis) -> String {
     )
 }
 
-fn join_values(items: &[ScoredValue<&str>]) -> String {
+fn join_values(items: &[ScoredValue<String>]) -> String {
     items
         .iter()
-        .map(|item| item.value)
+        .map(|item| item.value.as_str())
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -360,7 +379,89 @@ fn write_json(path: impl AsRef<Path>, value: &impl Serialize) -> Result<(), AppE
     Ok(())
 }
 
-fn write_placeholder_wav(path: &Path) -> Result<(), AppError> {
-    fs::write(path, b"placeholder wav: ffmpeg integration follows\n")?;
-    Ok(())
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn converts_audio_to_processed_wav_when_ffmpeg_is_available() {
+        if find_executable("ffmpeg").is_none() {
+            return;
+        }
+
+        let test_dir = std::env::temp_dir().join(format!(
+            "timbreprint-ffmpeg-test-{}",
+            Local::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        fs::create_dir_all(&test_dir).expect("create test dir");
+
+        let source_path = test_dir.join("source.wav");
+        let processed_path = test_dir.join("processed.wav");
+
+        let generated = Command::new(find_executable("ffmpeg").expect("ffmpeg path"))
+            .args([
+                "-y",
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=0.1",
+            ])
+            .arg(&source_path)
+            .status()
+            .expect("generate source audio");
+        assert!(generated.success());
+
+        convert_to_wav(&source_path, &processed_path, &test_dir).expect("convert source audio");
+
+        let header = fs::read(&processed_path).expect("read processed wav");
+        assert!(header.starts_with(b"RIFF"));
+        assert!(test_dir.join("ffmpeg.log").exists());
+
+        let _ = fs::remove_dir_all(test_dir);
+    }
+
+    #[test]
+    fn python_worker_writes_analysis_json_when_python_is_available() {
+        if find_executable("python3")
+            .or_else(|| find_executable("python"))
+            .is_none()
+            || find_executable("ffmpeg").is_none()
+        {
+            return;
+        }
+
+        let test_dir = std::env::temp_dir().join(format!(
+            "timbreprint-worker-test-{}",
+            Local::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        fs::create_dir_all(&test_dir).expect("create test dir");
+        let generated = Command::new(find_executable("ffmpeg").expect("ffmpeg path"))
+            .args([
+                "-y",
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=0.2",
+            ])
+            .arg(test_dir.join("processed.wav"))
+            .status()
+            .expect("generate processed wav");
+        assert!(generated.success());
+
+        run_python_worker(&test_dir).expect("run python worker");
+        let analysis = read_analysis(&test_dir).expect("read analysis");
+
+        assert!(matches!(
+            analysis.energy.value.as_str(),
+            "low" | "medium" | "high"
+        ));
+        assert!(!analysis.texture.is_empty());
+        assert!(test_dir.join("worker.log").exists());
+
+        let _ = fs::remove_dir_all(test_dir);
+    }
 }

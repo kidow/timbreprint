@@ -2,7 +2,7 @@
 
 Timbreprint is a local-first desktop app for turning a reference music file into a structured musical analysis and an English prompt for music generation tools.
 
-The first MVP focuses on the analysis and prompt workflow, not on generating new music directly. It accepts common audio files, creates a local job folder, writes mock analysis JSON with confidence scores, and produces a prompt that describes abstract musical traits instead of copying an artist or song.
+The first MVP focuses on the analysis and prompt workflow, not on generating new music directly. It accepts common audio files, creates a local job folder, writes analysis JSON with confidence scores, and produces a prompt that describes abstract musical traits instead of copying an artist or song.
 
 ## What It Does
 
@@ -24,14 +24,15 @@ Implemented:
 - Vite + React + TypeScript frontend
 - Single-screen MVP UI
 - Environment status panel
-- Mock browser preview flow
-- Rust commands for mock job creation
+- Browser preview fallback flow
+- Rust commands for local job creation
+- Real `ffmpeg` conversion to `processed.wav`
+- Python worker analysis using standard-library WAV feature extraction
 - JSON and prompt file output
 
 Not implemented yet:
 
-- Real `ffmpeg` conversion
-- Real `librosa` analysis
+- `librosa` analysis
 - Audio tagging models
 - Ollama or local LLM prompt rewriting
 - MusicGen or other local music generation
@@ -69,7 +70,7 @@ Then open:
 http://localhost:1420
 ```
 
-In browser preview mode, native Tauri commands are not available. The UI uses a mock fallback so you can still click through the basic flow.
+In browser preview mode, native Tauri commands are not available. The UI uses a static fallback so you can still click through the basic flow.
 
 ## Start The Desktop App
 
@@ -79,7 +80,7 @@ Use this when you want to run the actual Tauri app:
 pnpm tauri dev
 ```
 
-The desktop app can call the Rust commands that create local mock job output.
+The desktop app can call the Rust commands that create local job output.
 
 ## Build
 
@@ -118,8 +119,9 @@ jobs/
 
 ## Development Notes
 
-- The current analysis result is mock data by design.
+- The current analysis uses real WAV samples for basic tempo, energy, and texture heuristics.
+- Key, genre, mood, and instrument labels are still heuristic and low-confidence until model-based tagging is added.
 - Confidence is stored as a `0-1` number in JSON and shown as low, medium, or high in the UI.
 - The generated prompt is English-only for now.
 - Prompt generation avoids direct artist, song, copy, clone, and replication language.
-- Real audio analysis should be added after the file/job/prompt contract stays stable.
+- `librosa` or model-based audio analysis should be added after the file/job/prompt contract stays stable.
