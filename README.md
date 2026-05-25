@@ -60,6 +60,15 @@ pnpm install
 Optional Python analysis dependencies:
 
 ```bash
+python3 -m venv workers/.venv
+workers/.venv/bin/python -m pip install -r workers/requirements.txt
+```
+
+The Tauri worker automatically prefers `workers/.venv/bin/python` when it exists. If the local virtual environment is missing, it falls back to `python3` or `python` from `PATH`.
+
+If you intentionally want to install into your active Python environment instead:
+
+```bash
 python3 -m pip install -r workers/requirements.txt
 ```
 

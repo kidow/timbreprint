@@ -105,7 +105,7 @@ fn check_environment(app: AppHandle) -> Result<ToolStatus, AppError> {
 
     Ok(ToolStatus {
         ffmpeg: find_executable("ffmpeg"),
-        python: find_executable("python3").or_else(|| find_executable("python")),
+        python: worker_python_path().or_else(|| find_executable("python3").or_else(|| find_executable("python"))),
         app_data_dir: app_data_dir.display().to_string(),
         logs_dir: logs_dir.display().to_string(),
     })
@@ -285,8 +285,8 @@ fn convert_to_wav(source: &Path, output_path: &Path, job_dir: &Path) -> Result<(
 }
 
 fn run_python_worker(job_dir: &Path) -> Result<(), AppError> {
-    let python = find_executable("python3")
-        .or_else(|| find_executable("python"))
+    let python = worker_python_path()
+        .or_else(|| find_executable("python3").or_else(|| find_executable("python")))
         .ok_or(AppError::MissingPython)?;
     let worker_path = worker_script_path()?;
 
@@ -310,6 +310,19 @@ fn run_python_worker(job_dir: &Path) -> Result<(), AppError> {
     }
 
     Ok(())
+}
+
+fn worker_python_path() -> Option<String> {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../workers/.venv/bin/python")
+        .canonicalize()
+        .ok()?;
+
+    if path.is_file() {
+        Some(path.display().to_string())
+    } else {
+        None
+    }
 }
 
 fn worker_script_path() -> Result<PathBuf, AppError> {

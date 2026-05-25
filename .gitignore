@@ -2,5 +2,6 @@ node_modules/
 dist/
 src-tauri/target/
 src-tauri/gen/
+workers/.venv/
 *.log
 .DS_Store
