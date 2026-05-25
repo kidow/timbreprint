@@ -4,6 +4,17 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Timbreprint</title>
+    <script>
+      (() => {
+        const localhostNames = new Set(["localhost", "127.0.0.1", "::1"]);
+        if (!localhostNames.has(window.location.hostname)) return;
+
+        const script = document.createElement("script");
+        script.src = "https://www.react-grab.com/script.js";
+        script.crossOrigin = "anonymous";
+        document.head.appendChild(script);
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>
