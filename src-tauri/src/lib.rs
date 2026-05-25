@@ -64,6 +64,19 @@ struct Analysis {
     genre: Vec<ScoredValue<String>>,
     instruments: Vec<ScoredValue<String>>,
     texture: Vec<ScoredValue<String>>,
+    #[serde(default)]
+    features: Option<AnalysisFeatures>,
+}
+
+#[derive(Deserialize, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct AnalysisFeatures {
+    analysis_backend: Option<String>,
+    duration_seconds: Option<f32>,
+    rms: Option<f32>,
+    zero_crossing_rate: Option<f32>,
+    spectral_centroid_hz: Option<f32>,
+    onset_density: Option<f32>,
 }
 
 #[derive(Serialize)]
@@ -105,7 +118,8 @@ fn check_environment(app: AppHandle) -> Result<ToolStatus, AppError> {
 
     Ok(ToolStatus {
         ffmpeg: find_executable("ffmpeg"),
-        python: worker_python_path().or_else(|| find_executable("python3").or_else(|| find_executable("python"))),
+        python: worker_python_path()
+            .or_else(|| find_executable("python3").or_else(|| find_executable("python"))),
         app_data_dir: app_data_dir.display().to_string(),
         logs_dir: logs_dir.display().to_string(),
     })
@@ -361,29 +375,97 @@ fn sanitize_name(value: &str) -> String {
 }
 
 fn generate_prompt(analysis: &Analysis) -> String {
-    let genre = join_values(&analysis.genre);
-    let mood = join_values(&analysis.mood);
-    let instruments = join_values(&analysis.instruments);
-    let texture = join_values(&analysis.texture);
+    let mut parts = vec!["Create an original music track".to_string()];
 
-    format!(
-        "Create a {tempo} BPM {genre} track in {key} with {instruments}. The mood should feel {mood}, with {texture} texture and {energy} energy.",
-        tempo = analysis.tempo.value,
-        genre = genre,
-        key = analysis.key.value,
-        instruments = instruments,
-        mood = mood,
-        texture = texture,
-        energy = analysis.energy.value
-    )
+    if analysis.tempo.value > 0 && analysis.tempo.confidence >= 0.35 {
+        parts.push(format!("around {} BPM", analysis.tempo.value));
+    }
+
+    let genre = join_confident_values(&analysis.genre, 0.3);
+    if !genre.is_empty() {
+        parts.push(format!("with {} influences", genre));
+    }
+
+    if is_known_value(&analysis.key.value) && analysis.key.confidence >= 0.3 {
+        parts.push(format!("centered around {}", analysis.key.value));
+    }
+
+    let instruments = join_confident_values(&analysis.instruments, 0.25);
+    if !instruments.is_empty() {
+        parts.push(format!("using {}", instruments));
+    }
+
+    let mood = join_confident_values(&analysis.mood, 0.35);
+    if !mood.is_empty() {
+        parts.push(format!("with a {} mood", mood));
+    }
+
+    let texture = join_confident_values(&analysis.texture, 0.35);
+    if !texture.is_empty() {
+        parts.push(format!("and a {} texture", texture));
+    }
+
+    if is_known_value(&analysis.energy.value) && analysis.energy.confidence >= 0.4 {
+        parts.push(format!("at {} energy", analysis.energy.value));
+    }
+
+    parts.push(feature_phrase(analysis));
+    format!("{}.", parts.join(", "))
 }
 
-fn join_values(items: &[ScoredValue<String>]) -> String {
+fn join_confident_values(items: &[ScoredValue<String>], minimum_confidence: f32) -> String {
     items
         .iter()
+        .filter(|item| item.confidence >= minimum_confidence && is_known_value(&item.value))
         .map(|item| item.value.as_str())
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn is_known_value(value: &str) -> bool {
+    let normalized = value.trim().to_ascii_lowercase();
+    !normalized.is_empty() && normalized != "unknown"
+}
+
+fn feature_phrase(analysis: &Analysis) -> String {
+    let Some(features) = &analysis.features else {
+        return "avoid direct artist imitation, song cloning, or replication".to_string();
+    };
+
+    let mut details = Vec::new();
+
+    if let Some(spectral_centroid) = features.spectral_centroid_hz {
+        if spectral_centroid >= 3200.0 {
+            details.push("emphasize bright upper-frequency detail");
+        } else if spectral_centroid <= 1400.0 {
+            details.push("keep the tone smooth and low-centered");
+        }
+    }
+
+    if let Some(onset_density) = features.onset_density {
+        if onset_density >= 0.25 {
+            details.push("use active rhythmic motion");
+        } else if onset_density > 0.0 && onset_density < 0.08 {
+            details.push("leave space between attacks");
+        }
+    }
+
+    if let Some(rms) = features.rms {
+        if rms < 0.035 {
+            details.push("keep dynamics restrained");
+        } else if rms > 0.11 {
+            details.push("make the arrangement feel bold and forward");
+        }
+    }
+
+    if details.is_empty() {
+        "avoid direct artist imitation, song cloning, or replication".to_string()
+    } else {
+        format!(
+            "{}, while avoiding direct artist imitation, song cloning, or replication",
+            details.join(", ")
+        )
+    }
 }
 
 fn write_json(path: impl AsRef<Path>, value: &impl Serialize) -> Result<(), AppError> {
@@ -476,5 +558,54 @@ mod tests {
         assert!(test_dir.join("worker.log").exists());
 
         let _ = fs::remove_dir_all(test_dir);
+    }
+
+    #[test]
+    fn prompt_omits_unknown_low_confidence_values() {
+        let analysis = Analysis {
+            tempo: ScoredValue {
+                value: 0,
+                confidence: 0.15,
+            },
+            key: ScoredValue {
+                value: "unknown".to_string(),
+                confidence: 0.1,
+            },
+            energy: ScoredValue {
+                value: "medium".to_string(),
+                confidence: 0.7,
+            },
+            mood: vec![ScoredValue {
+                value: "steady".to_string(),
+                confidence: 0.45,
+            }],
+            genre: vec![ScoredValue {
+                value: "instrumental".to_string(),
+                confidence: 0.25,
+            }],
+            instruments: vec![ScoredValue {
+                value: "synth layers".to_string(),
+                confidence: 0.25,
+            }],
+            texture: vec![ScoredValue {
+                value: "smooth".to_string(),
+                confidence: 0.55,
+            }],
+            features: Some(AnalysisFeatures {
+                analysis_backend: Some("librosa".to_string()),
+                duration_seconds: Some(12.0),
+                rms: Some(0.02),
+                zero_crossing_rate: Some(0.01),
+                spectral_centroid_hz: Some(900.0),
+                onset_density: Some(0.03),
+            }),
+        };
+
+        let prompt = generate_prompt(&analysis);
+
+        assert!(!prompt.contains("0 BPM"));
+        assert!(!prompt.contains("unknown"));
+        assert!(prompt.contains("keep the tone smooth and low-centered"));
+        assert!(prompt.contains("avoiding direct artist imitation"));
     }
 }

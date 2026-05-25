@@ -42,6 +42,14 @@ type Analysis = {
   genre: ScoredValue[];
   instruments: ScoredValue[];
   texture: ScoredValue[];
+  features?: {
+    analysisBackend?: string;
+    durationSeconds?: number;
+    rms?: number;
+    zeroCrossingRate?: number;
+    spectralCentroidHz?: number;
+    onsetDensity?: number;
+  };
 };
 
 type ToolStatus = {
