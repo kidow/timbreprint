@@ -1,16 +1,8 @@
 import ReactDOM from "react-dom/client";
 import { open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
-import {
-  CheckCircle2,
-  Copy,
-  FileAudio,
-  FolderOpen,
-  Loader2,
-  RefreshCw,
-  Terminal,
-} from "lucide-react";
-import { useEffect, useState, type ReactNode } from "react";
+import { CheckCircle2, Copy, FileAudio, FolderOpen, Loader2, Terminal } from "lucide-react";
+import { useState, type ReactNode } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -54,13 +46,6 @@ type Analysis = {
     spectralCentroidHz?: number;
     onsetDensity?: number;
   };
-};
-
-type ToolStatus = {
-  ffmpeg: string | null;
-  python: string | null;
-  appDataDir: string;
-  logsDir: string;
 };
 
 type JobResult = {
@@ -135,30 +120,10 @@ const createBrowserPreviewJob = (sourcePath: string): JobResult => {
 };
 
 function App() {
-  const [tools, setTools] = useState<ToolStatus | null>(null);
   const [status, setStatus] = useState<JobStatus>("idle");
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [job, setJob] = useState<JobResult | null>(null);
   const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    void refreshToolStatus();
-  }, []);
-
-  const refreshToolStatus = async () => {
-    if (!isTauriRuntime()) {
-      setTools({
-        ffmpeg: null,
-        python: null,
-        appDataDir: "Tauri runtime required",
-        logsDir: "Tauri runtime required",
-      });
-      return;
-    }
-
-    const result = await invoke<ToolStatus>("check_environment");
-    setTools(result);
-  };
 
   const selectFile = async () => {
     setError(null);
@@ -199,7 +164,6 @@ function App() {
       });
       setJob(result);
       setStatus(result.status);
-      await refreshToolStatus();
     } catch (err) {
       setStatus("failed");
       setError(err instanceof Error ? err.message : String(err));
@@ -228,15 +192,6 @@ function App() {
             components.
           </p>
         </div>
-        <Button
-          aria-label="환경 다시 확인"
-          onClick={() => void refreshToolStatus()}
-          title="환경 다시 확인"
-          variant="outline"
-          size="icon"
-        >
-          <RefreshCw size={18} />
-        </Button>
       </section>
 
       <section className="workspace">
@@ -268,14 +223,6 @@ function App() {
           </div>
 
           {error ? <p className="error-text">{error}</p> : null}
-        </Card>
-
-        <Card className="settings-panel">
-          <h2>환경</h2>
-          <ToolRow label="ffmpeg" value={tools?.ffmpeg} />
-          <ToolRow label="Python" value={tools?.python} />
-          <ToolRow label="Data" value={tools?.appDataDir} />
-          <ToolRow label="Logs" value={tools?.logsDir} />
         </Card>
       </section>
 
@@ -343,15 +290,6 @@ function StatusBadge({ status }: { status: JobStatus }) {
       {inProgressStatuses.has(status) ? <Loader2 className="spin" size={15} /> : null}
       {status}
     </Badge>
-  );
-}
-
-function ToolRow({ label, value }: { label: string; value?: string | null }) {
-  return (
-    <div className="tool-row">
-      <span>{label}</span>
-      <code>{value ?? "not found"}</code>
-    </div>
   );
 }
 

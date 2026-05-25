@@ -298,12 +298,11 @@ h3 {
 .workspace {
   display: grid;
   gap: 18px;
-  grid-template-columns: minmax(0, 1fr) 340px;
+  grid-template-columns: minmax(0, 1fr);
   margin-top: 26px;
 }
 
 .input-panel,
-.settings-panel,
 .result-panel {
   padding: 18px;
 }
@@ -352,24 +351,6 @@ h3 {
   flex-wrap: wrap;
   gap: 10px;
   margin-top: 16px;
-}
-
-.tool-row {
-  border-top: 1px solid hsl(var(--border));
-  display: grid;
-  gap: 8px;
-  grid-template-columns: 72px minmax(0, 1fr);
-  padding: 12px 0;
-}
-
-.tool-row span {
-  color: hsl(var(--muted-foreground));
-  font-weight: 700;
-}
-
-.tool-row code {
-  color: hsl(var(--foreground));
-  overflow-wrap: anywhere;
 }
 
 .result-panel {
