@@ -65,6 +65,18 @@ struct Analysis {
     instruments: Vec<ScoredValue<String>>,
     texture: Vec<ScoredValue<String>>,
     #[serde(default)]
+    rhythm: Vec<ScoredValue<String>>,
+    #[serde(default)]
+    dynamics: Vec<ScoredValue<String>>,
+    #[serde(default)]
+    brightness: Vec<ScoredValue<String>>,
+    #[serde(default)]
+    space: Vec<ScoredValue<String>>,
+    #[serde(default)]
+    arrangement: Vec<ScoredValue<String>>,
+    #[serde(default, rename = "negativePrompt")]
+    negative_prompt: Vec<ScoredValue<String>>,
+    #[serde(default)]
     features: Option<AnalysisFeatures>,
 }
 
@@ -375,42 +387,82 @@ fn sanitize_name(value: &str) -> String {
 }
 
 fn generate_prompt(analysis: &Analysis) -> String {
-    let mut parts = vec!["Create an original music track".to_string()];
+    let mut opening = "Create an original music track".to_string();
 
     if analysis.tempo.value > 0 && analysis.tempo.confidence >= 0.35 {
-        parts.push(format!("around {} BPM", analysis.tempo.value));
-    }
-
-    let genre = join_confident_values(&analysis.genre, 0.3);
-    if !genre.is_empty() {
-        parts.push(format!("with {} influences", genre));
+        opening.push_str(&format!(" around {} BPM", analysis.tempo.value));
     }
 
     if is_known_value(&analysis.key.value) && analysis.key.confidence >= 0.3 {
-        parts.push(format!("centered around {}", analysis.key.value));
+        opening.push_str(&format!(" centered around {}", analysis.key.value));
     }
 
-    let instruments = join_confident_values(&analysis.instruments, 0.25);
-    if !instruments.is_empty() {
-        parts.push(format!("using {}", instruments));
+    let mut sentences = vec![format!("{opening}.")];
+
+    let genre = join_confident_values(&analysis.genre, 0.3);
+    let texture = join_confident_values(&analysis.texture, 0.35);
+    let energy = if is_known_value(&analysis.energy.value) && analysis.energy.confidence >= 0.4 {
+        Some(analysis.energy.value.as_str())
+    } else {
+        None
+    };
+    if !genre.is_empty() || !texture.is_empty() || energy.is_some() {
+        sentences.push(format!(
+            "Style direction: {}{}{}.",
+            phrase_or_default(&genre, "original contemporary production"),
+            phrase_suffix(&texture, " with a ", " texture"),
+            energy.map_or_else(String::new, |value| format!(" at {value} energy"))
+        ));
     }
 
     let mood = join_confident_values(&analysis.mood, 0.35);
     if !mood.is_empty() {
-        parts.push(format!("with a {} mood", mood));
+        sentences.push(format!("Mood: keep it {mood}."));
     }
 
-    let texture = join_confident_values(&analysis.texture, 0.35);
-    if !texture.is_empty() {
-        parts.push(format!("and a {} texture", texture));
+    let arrangement = join_confident_values(&analysis.arrangement, 0.35);
+    let rhythm = join_confident_values(&analysis.rhythm, 0.35);
+    if !arrangement.is_empty() || !rhythm.is_empty() {
+        sentences.push(format!(
+            "Arrangement: {}{}.",
+            phrase_or_default(&arrangement, "keep the structure clear and focused"),
+            phrase_suffix(&rhythm, " with ", "")
+        ));
     }
 
-    if is_known_value(&analysis.energy.value) && analysis.energy.confidence >= 0.4 {
-        parts.push(format!("at {} energy", analysis.energy.value));
+    let instruments = join_confident_values(&analysis.instruments, 0.25);
+    let brightness = join_confident_values(&analysis.brightness, 0.35);
+    if !instruments.is_empty() || !brightness.is_empty() {
+        sentences.push(format!(
+            "Sound palette: {}{}.",
+            phrase_or_default(&instruments, "use a cohesive instrumental palette"),
+            phrase_suffix(&brightness, " with ", "")
+        ));
     }
 
-    parts.push(feature_phrase(analysis));
-    format!("{}.", parts.join(", "))
+    let space = join_confident_values(&analysis.space, 0.35);
+    let dynamics = join_confident_values(&analysis.dynamics, 0.35);
+    let mix_phrase = mix_phrase(analysis);
+    if !space.is_empty() || !dynamics.is_empty() || !mix_phrase.is_empty() {
+        sentences.push(format!(
+            "Mix direction: {}{}{}.",
+            phrase_or_default(&space, "keep the mix clean and usable"),
+            phrase_suffix(&dynamics, " with ", ""),
+            phrase_suffix(&mix_phrase, ", ", "")
+        ));
+    }
+
+    let negative_prompt = join_confident_values(&analysis.negative_prompt, 0.4);
+    if negative_prompt.is_empty() {
+        sentences.push(
+            "Avoid artist-specific references, recreating existing songs, or recognizable copyrighted melody."
+                .to_string(),
+        );
+    } else {
+        sentences.push(format!("Avoid {negative_prompt}."));
+    }
+
+    sanitize_prompt(&sentences.join(" "))
 }
 
 fn join_confident_values(items: &[ScoredValue<String>], minimum_confidence: f32) -> String {
@@ -427,9 +479,110 @@ fn is_known_value(value: &str) -> bool {
     !normalized.is_empty() && normalized != "unknown"
 }
 
-fn feature_phrase(analysis: &Analysis) -> String {
+fn sanitize_prompt(input: &str) -> String {
+    let replacements = [
+        ("in the style of", "with abstract musical traits from"),
+        ("copying", "recreating"),
+        ("copy", "recreate"),
+        ("cloning", "recreating"),
+        ("clone", "recreate"),
+        ("replicating", "recreating"),
+        ("replicate", "recreate"),
+        ("replication", "recreation"),
+    ];
+
+    let mut output = input.to_string();
+    for (needle, replacement) in replacements {
+        output = replace_prompt_term(&output, needle, replacement);
+    }
+    collapse_prompt_spacing(&output)
+}
+
+fn replace_prompt_term(input: &str, needle: &str, replacement: &str) -> String {
+    if needle.is_empty() {
+        return input.to_string();
+    }
+
+    let mut output = String::new();
+    let input_lower = input.to_ascii_lowercase();
+    let needle_lower = needle.to_ascii_lowercase();
+    let mut cursor = 0;
+
+    while let Some(relative_index) = input_lower[cursor..].find(&needle_lower) {
+        let start = cursor + relative_index;
+        let end = start + needle.len();
+        if !has_prompt_term_boundaries(input, start, end) {
+            output.push_str(&input[cursor..end]);
+            cursor = end;
+            continue;
+        }
+        output.push_str(&input[cursor..start]);
+        output.push_str(replacement);
+        cursor = end;
+    }
+
+    output.push_str(&input[cursor..]);
+    output
+}
+
+#[cfg(test)]
+fn contains_prompt_term(input: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+
+    let input_lower = input.to_ascii_lowercase();
+    let needle_lower = needle.to_ascii_lowercase();
+    let mut cursor = 0;
+
+    while let Some(relative_index) = input_lower[cursor..].find(&needle_lower) {
+        let start = cursor + relative_index;
+        let end = start + needle.len();
+        if has_prompt_term_boundaries(input, start, end) {
+            return true;
+        }
+        cursor = end;
+    }
+
+    false
+}
+
+fn has_prompt_term_boundaries(input: &str, start: usize, end: usize) -> bool {
+    let before = input[..start].chars().next_back();
+    let after = input[end..].chars().next();
+    !is_prompt_word_character(before) && !is_prompt_word_character(after)
+}
+
+fn is_prompt_word_character(character: Option<char>) -> bool {
+    character.is_some_and(|value| value.is_ascii_alphanumeric())
+}
+
+fn collapse_prompt_spacing(input: &str) -> String {
+    let mut output = input.split_whitespace().collect::<Vec<_>>().join(" ");
+    output = output.replace(" ,", ",");
+    output = output.replace(" .", ".");
+    output
+}
+
+fn phrase_or_default(value: &str, default: &str) -> String {
+    if value.is_empty() {
+        default.to_string()
+    } else {
+        value.to_string()
+    }
+}
+
+fn phrase_suffix(value: &str, prefix: &str, suffix: &str) -> String {
+    if value.is_empty() {
+        String::new()
+    } else {
+        format!("{prefix}{value}{suffix}")
+    }
+}
+
+fn mix_phrase(analysis: &Analysis) -> String {
     let Some(features) = &analysis.features else {
-        return "avoid direct artist imitation, song cloning, or replication".to_string();
+        return String::new();
     };
 
     let mut details = Vec::new();
@@ -458,14 +611,7 @@ fn feature_phrase(analysis: &Analysis) -> String {
         }
     }
 
-    if details.is_empty() {
-        "avoid direct artist imitation, song cloning, or replication".to_string()
-    } else {
-        format!(
-            "{}, while avoiding direct artist imitation, song cloning, or replication",
-            details.join(", ")
-        )
-    }
+    details.join(", ")
 }
 
 fn write_json(path: impl AsRef<Path>, value: &impl Serialize) -> Result<(), AppError> {
@@ -591,6 +737,36 @@ mod tests {
                 value: "smooth".to_string(),
                 confidence: 0.55,
             }],
+            rhythm: vec![ScoredValue {
+                value: "spacious rhythm".to_string(),
+                confidence: 0.58,
+            }],
+            dynamics: vec![ScoredValue {
+                value: "restrained dynamics".to_string(),
+                confidence: 0.64,
+            }],
+            brightness: vec![ScoredValue {
+                value: "dark low-mid focus".to_string(),
+                confidence: 0.62,
+            }],
+            space: vec![ScoredValue {
+                value: "wide atmospheric space".to_string(),
+                confidence: 0.55,
+            }],
+            arrangement: vec![ScoredValue {
+                value: "start minimal and let layers enter gradually".to_string(),
+                confidence: 0.46,
+            }],
+            negative_prompt: vec![
+                ScoredValue {
+                    value: "artist-specific references".to_string(),
+                    confidence: 0.9,
+                },
+                ScoredValue {
+                    value: "recreating existing songs".to_string(),
+                    confidence: 0.9,
+                },
+            ],
             features: Some(AnalysisFeatures {
                 analysis_backend: Some("librosa".to_string()),
                 duration_seconds: Some(12.0),
@@ -605,7 +781,137 @@ mod tests {
 
         assert!(!prompt.contains("0 BPM"));
         assert!(!prompt.contains("unknown"));
+        assert!(prompt.contains("Arrangement: start minimal"));
+        assert!(prompt.contains("Sound palette: synth layers"));
+        assert!(prompt.contains("Mix direction: wide atmospheric space"));
         assert!(prompt.contains("keep the tone smooth and low-centered"));
-        assert!(prompt.contains("avoiding direct artist imitation"));
+        assert!(prompt.contains("Avoid artist-specific references"));
+    }
+
+    #[test]
+    fn prompt_sanitizer_rewrites_direct_imitation_terms() {
+        let prompt = sanitize_prompt(
+            "Make this in the style of a famous artist, copy the hook, clone the groove, and replicate the drop.",
+        );
+
+        assert_prompt_policy(&prompt);
+        assert!(prompt
+            .to_ascii_lowercase()
+            .contains("abstract musical traits"));
+        assert!(prompt.to_ascii_lowercase().contains("recreate"));
+    }
+
+    #[test]
+    fn prompt_sanitizer_preserves_copyrighted_safety_phrase() {
+        let prompt = sanitize_prompt(
+            "Avoid artist-specific references, recreating existing songs, or recognizable copyrighted melody.",
+        );
+
+        assert_prompt_policy(&prompt);
+        assert!(prompt.contains("recognizable copyrighted melody"));
+        assert!(!prompt.contains("recreaterighted"));
+    }
+
+    #[test]
+    fn generated_prompt_uses_default_safety_policy_when_negative_prompt_is_empty() {
+        let analysis = Analysis {
+            tempo: ScoredValue {
+                value: 120,
+                confidence: 0.8,
+            },
+            key: ScoredValue {
+                value: "C tonal center".to_string(),
+                confidence: 0.5,
+            },
+            energy: ScoredValue {
+                value: "high".to_string(),
+                confidence: 0.7,
+            },
+            mood: vec![],
+            genre: vec![ScoredValue {
+                value: "electronic".to_string(),
+                confidence: 0.5,
+            }],
+            instruments: vec![],
+            texture: vec![],
+            rhythm: vec![],
+            dynamics: vec![],
+            brightness: vec![],
+            space: vec![],
+            arrangement: vec![],
+            negative_prompt: vec![],
+            features: None,
+        };
+
+        let prompt = generate_prompt(&analysis);
+
+        assert_prompt_policy(&prompt);
+        assert!(prompt.contains("Avoid artist-specific references"));
+        assert!(prompt.contains("recreating existing songs"));
+        assert!(prompt.contains("recognizable copyrighted melody"));
+    }
+
+    #[test]
+    fn generated_prompt_sanitizes_unsafe_analysis_values() {
+        let analysis = Analysis {
+            tempo: ScoredValue {
+                value: 100,
+                confidence: 0.8,
+            },
+            key: ScoredValue {
+                value: "unknown".to_string(),
+                confidence: 0.1,
+            },
+            energy: ScoredValue {
+                value: "medium".to_string(),
+                confidence: 0.7,
+            },
+            mood: vec![ScoredValue {
+                value: "copy the original mood".to_string(),
+                confidence: 0.8,
+            }],
+            genre: vec![ScoredValue {
+                value: "in the style of famous synth pop".to_string(),
+                confidence: 0.8,
+            }],
+            instruments: vec![ScoredValue {
+                value: "clone the exact lead sound".to_string(),
+                confidence: 0.8,
+            }],
+            texture: vec![ScoredValue {
+                value: "replicate the mix texture".to_string(),
+                confidence: 0.8,
+            }],
+            rhythm: vec![],
+            dynamics: vec![],
+            brightness: vec![],
+            space: vec![],
+            arrangement: vec![],
+            negative_prompt: vec![],
+            features: None,
+        };
+
+        let prompt = generate_prompt(&analysis);
+
+        assert_prompt_policy(&prompt);
+        assert!(prompt.contains("recognizable copyrighted melody"));
+    }
+
+    fn assert_prompt_policy(prompt: &str) {
+        for blocked in [
+            "in the style of",
+            "copy",
+            "copying",
+            "clone",
+            "cloning",
+            "replicate",
+            "replicating",
+            "replication",
+        ] {
+            assert!(
+                !contains_prompt_term(prompt, blocked),
+                "prompt contained blocked term `{blocked}`: {prompt}"
+            );
+        }
     }
 }

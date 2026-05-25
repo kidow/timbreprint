@@ -38,6 +38,12 @@ type Analysis = {
   genre: ScoredValue[];
   instruments: ScoredValue[];
   texture: ScoredValue[];
+  rhythm: ScoredValue[];
+  dynamics: ScoredValue[];
+  brightness: ScoredValue[];
+  space: ScoredValue[];
+  arrangement: ScoredValue[];
+  negativePrompt: ScoredValue[];
   features?: {
     analysisBackend?: string;
     durationSeconds?: number;
@@ -106,6 +112,31 @@ const createBrowserPreviewJob = (sourcePath: string): JobResult => {
       { value: "reverb-heavy", confidence: 0.7 },
       { value: "intimate", confidence: 0.6 },
     ],
+    rhythm: [
+      { value: "moderate steady pulse", confidence: 0.6 },
+      { value: "clearly marked pulse", confidence: 0.5 },
+    ],
+    dynamics: [
+      { value: "controlled dynamics", confidence: 0.6 },
+      { value: "even loudness", confidence: 0.5 },
+    ],
+    brightness: [
+      { value: "balanced frequency profile", confidence: 0.6 },
+      { value: "soft highs", confidence: 0.5 },
+    ],
+    space: [
+      { value: "wide atmospheric space", confidence: 0.6 },
+      { value: "gentle reverb tail", confidence: 0.5 },
+    ],
+    arrangement: [
+      { value: "start minimal and let layers enter gradually", confidence: 0.6 },
+      { value: "add subtle variation between sections", confidence: 0.5 },
+    ],
+    negativePrompt: [
+      { value: "artist-specific references", confidence: 0.9 },
+      { value: "recreating existing songs", confidence: 0.9 },
+      { value: "recognizable copyrighted melody", confidence: 0.9 },
+    ],
   };
 
   return {
@@ -115,7 +146,7 @@ const createBrowserPreviewJob = (sourcePath: string): JobResult => {
     jobDir: "Tauri runtime required",
     analysis,
     prompt:
-      "Create a 92 BPM indie electronic, ambient pop track in A minor with analog synth, soft drums, bass pad. The mood should feel melancholic, warm, hopeful, with spacious, reverb-heavy, intimate texture and medium energy.",
+      "Create an original music track around 92 BPM centered around A minor. Style direction: indie electronic, ambient pop with spacious, reverb-heavy, intimate texture at medium energy. Mood: keep it melancholic, warm, hopeful. Arrangement: start minimal and let layers enter gradually, add subtle variation between sections with moderate steady pulse, clearly marked pulse. Sound palette: analog synth, soft drums, bass pad with balanced frequency profile, soft highs. Mix direction: wide atmospheric space, gentle reverb tail with controlled dynamics, even loudness. Avoid artist-specific references, recreating existing songs, recognizable copyrighted melody.",
   };
 };
 
@@ -330,6 +361,12 @@ function App() {
                     <TagGroup title="Mood">{pillList(job.analysis.mood)}</TagGroup>
                     <TagGroup title="Instruments">{pillList(job.analysis.instruments)}</TagGroup>
                     <TagGroup title="Texture">{pillList(job.analysis.texture)}</TagGroup>
+                    <TagGroup title="Rhythm">{pillList(job.analysis.rhythm)}</TagGroup>
+                    <TagGroup title="Dynamics">{pillList(job.analysis.dynamics)}</TagGroup>
+                    <TagGroup title="Brightness">{pillList(job.analysis.brightness)}</TagGroup>
+                    <TagGroup title="Space">{pillList(job.analysis.space)}</TagGroup>
+                    <TagGroup title="Arrangement">{pillList(job.analysis.arrangement)}</TagGroup>
+                    <TagGroup title="Avoid">{pillList(job.analysis.negativePrompt)}</TagGroup>
                   </div>
                 </section>
 

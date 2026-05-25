@@ -49,6 +49,12 @@ def analyze_with_librosa(path: Path) -> dict[str, object] | None:
     mood = classify_mood(energy, texture[0]["value"], tempo)
     genre = classify_genre(energy, texture[0]["value"], tempo)
     instruments = classify_instruments(texture[0]["value"], energy)
+    brightness = classify_brightness(spectral_centroid)
+    rhythm = classify_rhythm(onset_density, tempo)
+    dynamics = classify_dynamics(rms)
+    space = classify_space(rms, texture[0]["value"])
+    arrangement = classify_arrangement(energy, rhythm[0]["value"], duration)
+    negative_prompt = classify_negative_prompt(brightness[0]["value"], energy)
 
     return {
         "tempo": scored(tempo, 0.7 if tempo > 0 else 0.15),
@@ -58,6 +64,12 @@ def analyze_with_librosa(path: Path) -> dict[str, object] | None:
         "genre": genre,
         "instruments": instruments,
         "texture": texture,
+        "rhythm": rhythm,
+        "dynamics": dynamics,
+        "brightness": brightness,
+        "space": space,
+        "arrangement": arrangement,
+        "negativePrompt": negative_prompt,
         "features": {
             "analysisBackend": "librosa",
             "durationSeconds": round(duration, 2),
@@ -141,6 +153,12 @@ def analyze_wav(path: Path) -> dict[str, object]:
     mood = classify_mood(energy, texture[0]["value"], tempo)
     genre = classify_genre(energy, texture[0]["value"], tempo)
     instruments = classify_instruments(texture[0]["value"], energy)
+    brightness = classify_brightness(None, zero_cross_rate)
+    rhythm = classify_rhythm(None, tempo)
+    dynamics = classify_dynamics(rms)
+    space = classify_space(rms, texture[0]["value"])
+    arrangement = classify_arrangement(energy, rhythm[0]["value"], duration)
+    negative_prompt = classify_negative_prompt(brightness[0]["value"], energy)
 
     return {
         "tempo": scored(tempo, tempo_confidence),
@@ -150,6 +168,12 @@ def analyze_wav(path: Path) -> dict[str, object]:
         "genre": genre,
         "instruments": instruments,
         "texture": texture,
+        "rhythm": rhythm,
+        "dynamics": dynamics,
+        "brightness": brightness,
+        "space": space,
+        "arrangement": arrangement,
+        "negativePrompt": negative_prompt,
         "features": {
             "analysisBackend": "stdlib-wave",
             "durationSeconds": round(duration, 2),
@@ -250,6 +274,92 @@ def classify_instruments(texture: str, energy: str) -> list[dict[str, str | floa
     if energy == "low":
         return [scored("soft pads", 0.25), scored("minimal percussion", 0.2)]
     return [scored("synth layers", 0.25), scored("steady drums", 0.2)]
+
+
+def classify_brightness(
+    spectral_centroid: float | None,
+    zero_cross_rate: float | None = None,
+) -> list[dict[str, str | float]]:
+    if spectral_centroid is not None:
+        if spectral_centroid >= 3200:
+            return [scored("bright upper range", 0.62), scored("crisp tone", 0.5)]
+        if spectral_centroid <= 1400:
+            return [scored("dark low-mid focus", 0.62), scored("soft highs", 0.5)]
+        return [scored("balanced frequency profile", 0.56)]
+
+    if zero_cross_rate is not None and zero_cross_rate > 0.1:
+        return [scored("bright upper range", 0.42)]
+    if zero_cross_rate is not None and zero_cross_rate < 0.04:
+        return [scored("dark low-mid focus", 0.42)]
+    return [scored("balanced frequency profile", 0.38)]
+
+
+def classify_rhythm(
+    onset_density: float | None,
+    tempo: int,
+) -> list[dict[str, str | float]]:
+    if onset_density is not None and onset_density >= 0.25:
+        return [scored("active rhythmic motion", 0.62), scored("clearly marked pulse", 0.52)]
+    if onset_density is not None and 0 < onset_density < 0.08:
+        return [scored("spacious rhythm", 0.58), scored("minimal attack pattern", 0.46)]
+    if tempo >= 115:
+        return [scored("steady forward pulse", 0.45)]
+    if tempo > 0 and tempo <= 85:
+        return [scored("slow measured pulse", 0.45)]
+    return [scored("moderate steady pulse", 0.38)]
+
+
+def classify_dynamics(rms: float) -> list[dict[str, str | float]]:
+    if rms < 0.035:
+        return [scored("restrained dynamics", 0.64), scored("soft transients", 0.48)]
+    if rms > 0.11:
+        return [scored("bold dynamics", 0.68), scored("forward impact", 0.52)]
+    return [scored("controlled dynamics", 0.58), scored("even loudness", 0.44)]
+
+
+def classify_space(rms: float, texture: str) -> list[dict[str, str | float]]:
+    if rms < 0.035 or texture == "smooth":
+        return [scored("wide atmospheric space", 0.55), scored("gentle reverb tail", 0.45)]
+    if texture == "bright":
+        return [scored("clear foreground presence", 0.48)]
+    return [scored("balanced stereo space", 0.44)]
+
+
+def classify_arrangement(
+    energy: str,
+    rhythm: str | int | float,
+    duration: float,
+) -> list[dict[str, str | float]]:
+    if energy == "high":
+        return [
+            scored("open with a short focused intro", 0.44),
+            scored("build toward a fuller central section", 0.48),
+        ]
+    if "spacious" in str(rhythm) or duration >= 180:
+        return [
+            scored("start minimal and let layers enter gradually", 0.46),
+            scored("keep transitions smooth and unhurried", 0.44),
+        ]
+    return [
+        scored("establish the main groove early", 0.4),
+        scored("add subtle variation between sections", 0.38),
+    ]
+
+
+def classify_negative_prompt(
+    brightness: str | int | float,
+    energy: str,
+) -> list[dict[str, str | float]]:
+    items = [
+        scored("artist-specific references", 0.9),
+        scored("recreating existing songs", 0.9),
+        scored("recognizable copyrighted melody", 0.9),
+    ]
+    if "bright" in str(brightness):
+        items.append(scored("harsh treble", 0.5))
+    if energy == "low":
+        items.append(scored("overly compressed drums", 0.45))
+    return items
 
 
 def main() -> int:
