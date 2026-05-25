@@ -1,3 +1,4 @@
+import { flushSync } from "react-dom";
 import ReactDOM from "react-dom/client";
 import { open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
@@ -6,7 +7,6 @@ import { useState, type ReactNode } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card } from "@/components/ui/card";
 import "./styles.css";
 
 type Confidence = "낮음" | "중간" | "높음";
@@ -149,9 +149,12 @@ function App() {
   const runAnalysis = async () => {
     if (!selectedPath) return;
 
-    setError(null);
-    setIsRunning(true);
-    setStatus("preprocessing");
+    flushSync(() => {
+      setError(null);
+      setJob(null);
+      setIsRunning(true);
+      setStatus("preprocessing");
+    });
     await new Promise((resolve) => window.setTimeout(resolve, 0));
 
     try {
@@ -186,99 +189,188 @@ function App() {
     await navigator.clipboard.writeText(job.prompt);
   };
 
+  const fileStateLabel = selectedPath ? "File loaded" : "No file";
+  const outputStateLabel = job ? "Prompt ready" : "No output";
+
   return (
     <main className="app-shell">
-      <section className="toolbar">
-        <div>
+      <header className="toolbar">
+        <div className="title-block">
           <p className="eyebrow">Local music analysis</p>
           <h1>Timbreprint</h1>
           <p className="page-description">
-            Local audio analysis, prompt extraction, and job tracking with shadcn
-            components.
+            Analyze a local track, inspect its musical shape, and extract an English
+            generation prompt.
           </p>
         </div>
-      </section>
+        <div className="toolbar-status">
+          <Badge variant="outline">{fileStateLabel}</Badge>
+          <StatusBadge status={status} />
+          <Badge variant="secondary">{outputStateLabel}</Badge>
+        </div>
+      </header>
 
       <section className="workspace">
-        <Card className="input-panel">
-          <div className="drop-zone">
-            <FileAudio size={30} />
-            <div>
-              <h2>음악 파일 선택</h2>
-              <p>mp3, wav, m4a, flac / 10분 이하 파일을 MVP 입력으로 다룹니다.</p>
+        <aside className="control-rail">
+          <section className="panel panel--primary">
+            <div className="panel-head">
+              <div>
+                <p className="eyebrow">Input</p>
+                <h2>Source</h2>
+              </div>
+              <Badge variant="outline">MVP</Badge>
             </div>
-            <Button onClick={() => void selectFile()}>파일 선택</Button>
-          </div>
 
-          {selectedPath ? <p className="selected-path">{selectedPath}</p> : null}
+            <div className="drop-zone">
+              <FileAudio size={28} />
+              <div>
+                <p className="drop-title">Local track</p>
+                <p>mp3, wav, m4a, flac. 10 min max.</p>
+              </div>
+              <Button onClick={() => void selectFile()} variant="secondary">
+                Choose file
+              </Button>
+            </div>
 
-          <div className="actions">
-            <Button
-              disabled={!selectedPath || isRunning}
-              loading={isRunning}
-              onClick={() => void runAnalysis()}
-            >
-              {isRunning ? null : <Terminal size={16} />}
-              분석 실행
-            </Button>
-            <StatusBadge status={status} />
-          </div>
+            {selectedPath ? <p className="selected-path">{selectedPath}</p> : null}
 
-          {error ? <p className="error-text">{error}</p> : null}
-        </Card>
+            <div className="actions">
+              <Button
+                disabled={!selectedPath || isRunning}
+                loading={isRunning}
+                onClick={() => void runAnalysis()}
+              >
+                {isRunning ? null : <Terminal size={16} />}
+                Analyze
+              </Button>
+            </div>
+
+            {error ? <p className="error-text">{error}</p> : null}
+          </section>
+
+          <section className="panel panel--subtle">
+            <div className="panel-head">
+              <div>
+                <p className="eyebrow">Job</p>
+                <h2>Current file</h2>
+              </div>
+            </div>
+            <dl className="meta-list">
+              <div>
+                <dt>State</dt>
+                <dd>{status}</dd>
+              </div>
+              <div>
+                <dt>Source</dt>
+                <dd>{selectedPath ? selectedPath : "No track loaded"}</dd>
+              </div>
+              <div>
+                <dt>Mode</dt>
+                <dd>{isRunning ? "Analyzing" : "Idle"}</dd>
+              </div>
+              <div>
+                <dt>Output</dt>
+                <dd>{job ? job.jobDir : "Not generated yet"}</dd>
+              </div>
+            </dl>
+          </section>
+        </aside>
+
+        <section className="analysis-surface">
+          {job ? (
+            <>
+              <section className="panel panel--summary">
+                <div className="result-header">
+                  <div>
+                    <p className="eyebrow">Analysis result</p>
+                    <h2>{job.id}</h2>
+                  </div>
+                  <div className="result-actions">
+                    <Button onClick={() => void copyPrompt()} variant="secondary">
+                      <Copy size={16} />
+                      Copy prompt
+                    </Button>
+                    <Button onClick={() => void openJobFolder()} variant="outline">
+                      <FolderOpen size={16} />
+                      Open output
+                    </Button>
+                  </div>
+                </div>
+
+                <div className="summary-strip">
+                  <Metric
+                    label="Tempo"
+                    value={`${job.analysis.tempo.value} BPM`}
+                    score={job.analysis.tempo.confidence}
+                  />
+                  <Metric
+                    label="Key"
+                    value={job.analysis.key.value}
+                    score={job.analysis.key.confidence}
+                  />
+                  <Metric
+                    label="Energy"
+                    value={job.analysis.energy.value}
+                    score={job.analysis.energy.confidence}
+                  />
+                </div>
+              </section>
+
+              <section className="details-grid">
+                <section className="panel panel--dense">
+                  <div className="panel-head">
+                    <div>
+                      <p className="eyebrow">Tags</p>
+                      <h2>Musical shape</h2>
+                    </div>
+                  </div>
+
+                  <div className="tag-grid">
+                    <TagGroup title="Genre">{pillList(job.analysis.genre)}</TagGroup>
+                    <TagGroup title="Mood">{pillList(job.analysis.mood)}</TagGroup>
+                    <TagGroup title="Instruments">{pillList(job.analysis.instruments)}</TagGroup>
+                    <TagGroup title="Texture">{pillList(job.analysis.texture)}</TagGroup>
+                  </div>
+                </section>
+
+                <section className="panel panel--dense">
+                  <div className="panel-head">
+                    <div>
+                      <p className="eyebrow">Prompt</p>
+                      <h2>English Prompt</h2>
+                    </div>
+                  </div>
+
+                  <div className="prompt-box">
+                    <p>{job.prompt}</p>
+                  </div>
+                </section>
+              </section>
+
+              <section className="panel panel--json">
+                <div className="panel-head">
+                  <div>
+                    <p className="eyebrow">Data</p>
+                    <h2>Raw JSON</h2>
+                  </div>
+                </div>
+                <details className="json-view" open>
+                  <summary>Raw analysis JSON</summary>
+                  <pre>{JSON.stringify(job.analysis, null, 2)}</pre>
+                </details>
+              </section>
+            </>
+          ) : (
+            <section className="panel panel--empty">
+              <p className="eyebrow">Result</p>
+              <h2>No analysis yet</h2>
+              <p>
+                Choose a local file, then run analysis.
+              </p>
+            </section>
+          )}
+        </section>
       </section>
-
-      {job ? (
-        <Card className="result-panel">
-          <div className="result-header">
-            <div>
-              <p className="eyebrow">Analysis result</p>
-              <h2>{job.id}</h2>
-            </div>
-            <div className="result-actions">
-              <Button onClick={() => void copyPrompt()} variant="secondary">
-                <Copy size={16} />
-                프롬프트 복사
-              </Button>
-              <Button onClick={() => void openJobFolder()} variant="outline">
-                <FolderOpen size={16} />
-                결과 폴더 열기
-              </Button>
-            </div>
-          </div>
-
-          <div className="summary-grid">
-            <Metric
-              label="Tempo"
-              value={`${job.analysis.tempo.value} BPM`}
-              score={job.analysis.tempo.confidence}
-            />
-            <Metric label="Key" value={job.analysis.key.value} score={job.analysis.key.confidence} />
-            <Metric
-              label="Energy"
-              value={job.analysis.energy.value}
-              score={job.analysis.energy.confidence}
-            />
-          </div>
-
-          <div className="tag-grid">
-            <TagGroup title="Genre">{pillList(job.analysis.genre)}</TagGroup>
-            <TagGroup title="Mood">{pillList(job.analysis.mood)}</TagGroup>
-            <TagGroup title="Instruments">{pillList(job.analysis.instruments)}</TagGroup>
-            <TagGroup title="Texture">{pillList(job.analysis.texture)}</TagGroup>
-          </div>
-
-          <div className="prompt-box">
-            <h3>English prompt</h3>
-            <p>{job.prompt}</p>
-          </div>
-
-          <details className="json-view">
-            <summary>JSON 보기</summary>
-            <pre>{JSON.stringify(job.analysis, null, 2)}</pre>
-          </details>
-        </Card>
-      ) : null}
     </main>
   );
 }
