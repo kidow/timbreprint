@@ -40,7 +40,7 @@ Not implemented yet:
 ## Requirements
 
 - macOS
-- Node.js and npm
+- Node.js and pnpm
 - Rust and Cargo
 - Tauri system prerequisites
 
@@ -52,7 +52,7 @@ Optional for later MVP steps:
 ## Install
 
 ```bash
-npm install
+pnpm install
 ```
 
 ## Start The Web Preview
@@ -60,7 +60,7 @@ npm install
 Use this when you want to inspect the React UI in a browser:
 
 ```bash
-npm run dev
+pnpm dev
 ```
 
 Then open:
@@ -76,7 +76,7 @@ In browser preview mode, native Tauri commands are not available. The UI uses a 
 Use this when you want to run the actual Tauri app:
 
 ```bash
-npm run tauri dev
+pnpm tauri dev
 ```
 
 The desktop app can call the Rust commands that create local mock job output.
@@ -86,7 +86,7 @@ The desktop app can call the Rust commands that create local mock job output.
 Build the frontend:
 
 ```bash
-npm run build
+pnpm build
 ```
 
 Check the Rust/Tauri side:
