@@ -16,6 +16,8 @@ enum AppError {
     UnsupportedFormat(String),
     #[error("audio file is larger than the MVP limit of 10 minutes")]
     TooLong,
+    #[error("invalid segment selection: {0}")]
+    InvalidSegment(String),
     #[error("ffmpeg was not found. Install ffmpeg or add it to PATH.")]
     MissingFfmpeg,
     #[error("ffmpeg conversion failed: {0}")]
@@ -138,6 +140,8 @@ struct SourceMetadata<'a> {
     extension: String,
     size_bytes: u64,
     duration_seconds: Option<u64>,
+    segment_start_seconds: Option<f64>,
+    segment_end_seconds: Option<f64>,
 }
 
 #[derive(Serialize)]
@@ -175,12 +179,30 @@ fn check_environment(app: AppHandle) -> Result<ToolStatus, AppError> {
 }
 
 #[tauri::command]
-fn run_analysis(app: AppHandle, source_path: String) -> Result<JobResult, AppError> {
+fn probe_audio_duration(source_path: String) -> Result<Option<f64>, AppError> {
+    validate_audio_path(&source_path)?;
+    Ok(probe_duration_seconds_f64(&PathBuf::from(&source_path)))
+}
+
+#[tauri::command]
+fn run_analysis(
+    app: AppHandle,
+    source_path: String,
+    start_seconds: Option<f64>,
+    end_seconds: Option<f64>,
+) -> Result<JobResult, AppError> {
     validate_audio_path(&source_path)?;
 
     let source = PathBuf::from(&source_path);
     let duration_seconds = probe_duration_seconds(&source);
-    if duration_seconds.is_some_and(|duration| duration > 600) {
+    let (segment_start, segment_end) =
+        validate_segment(start_seconds, end_seconds, duration_seconds)?;
+
+    let effective_seconds = match (segment_start, segment_end) {
+        (Some(start), Some(end)) => (end - start).ceil() as u64,
+        _ => duration_seconds.unwrap_or(0),
+    };
+    if effective_seconds > 600 {
         return Err(AppError::TooLong);
     }
 
@@ -200,7 +222,13 @@ fn run_analysis(app: AppHandle, source_path: String) -> Result<JobResult, AppErr
     fs::create_dir_all(&job_dir)?;
 
     let processed_path = job_dir.join("processed.wav");
-    convert_to_wav(&source, &processed_path, &job_dir)?;
+    convert_to_wav(
+        &source,
+        &processed_path,
+        &job_dir,
+        segment_start,
+        segment_end,
+    )?;
 
     let metadata = fs::metadata(&source)?;
     let source_metadata = SourceMetadata {
@@ -217,6 +245,8 @@ fn run_analysis(app: AppHandle, source_path: String) -> Result<JobResult, AppErr
             .to_ascii_lowercase(),
         size_bytes: metadata.len(),
         duration_seconds,
+        segment_start_seconds: segment_start,
+        segment_end_seconds: segment_end,
     };
     write_json(job_dir.join("source-metadata.json"), &source_metadata)?;
 
@@ -312,6 +342,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             check_environment,
+            probe_audio_duration,
             run_analysis,
             list_recent_jobs,
             open_path
@@ -354,7 +385,7 @@ fn find_executable(name: &str) -> Option<String> {
         })
 }
 
-fn probe_duration_seconds(path: &Path) -> Option<u64> {
+fn probe_duration_seconds_f64(path: &Path) -> Option<f64> {
     let output = Command::new("ffprobe")
         .args([
             "-v",
@@ -373,18 +404,67 @@ fn probe_duration_seconds(path: &Path) -> Option<u64> {
     }
 
     let value = String::from_utf8(output.stdout).ok()?;
-    value
-        .trim()
-        .parse::<f64>()
-        .ok()
-        .map(|seconds| seconds.ceil() as u64)
+    value.trim().parse::<f64>().ok().filter(|seconds| *seconds > 0.0)
 }
 
-fn convert_to_wav(source: &Path, output_path: &Path, job_dir: &Path) -> Result<(), AppError> {
+fn probe_duration_seconds(path: &Path) -> Option<u64> {
+    probe_duration_seconds_f64(path).map(|seconds| seconds.ceil() as u64)
+}
+
+fn validate_segment(
+    start_seconds: Option<f64>,
+    end_seconds: Option<f64>,
+    duration_seconds: Option<u64>,
+) -> Result<(Option<f64>, Option<f64>), AppError> {
+    let (Some(start), Some(end)) = (start_seconds, end_seconds) else {
+        // No segment, or only one bound supplied — analyze the full track.
+        return Ok((None, None));
+    };
+
+    if !start.is_finite() || !end.is_finite() {
+        return Err(AppError::InvalidSegment("bounds must be finite".to_string()));
+    }
+    if start < 0.0 {
+        return Err(AppError::InvalidSegment("start must be >= 0".to_string()));
+    }
+    if end - start < 1.0 {
+        return Err(AppError::InvalidSegment(
+            "segment must be at least 1 second".to_string(),
+        ));
+    }
+    if let Some(duration) = duration_seconds {
+        if end > duration as f64 + 1.0 {
+            return Err(AppError::InvalidSegment(
+                "end exceeds track duration".to_string(),
+            ));
+        }
+    }
+
+    // Treat a full-span selection as no crop to skip needless ffmpeg seeking.
+    if start <= 0.0 && duration_seconds.is_some_and(|d| end >= d as f64) {
+        return Ok((None, None));
+    }
+
+    Ok((Some(start), Some(end)))
+}
+
+fn convert_to_wav(
+    source: &Path,
+    output_path: &Path,
+    job_dir: &Path,
+    start_seconds: Option<f64>,
+    end_seconds: Option<f64>,
+) -> Result<(), AppError> {
     let ffmpeg = find_executable("ffmpeg").ok_or(AppError::MissingFfmpeg)?;
-    let output = Command::new(ffmpeg)
-        .args(["-y", "-v", "error", "-i"])
-        .arg(source)
+    let mut command = Command::new(ffmpeg);
+    command.args(["-y", "-v", "error", "-i"]).arg(source);
+    // -ss/-t after -i so seeking is sample-accurate for the analysis window.
+    if let (Some(start), Some(end)) = (start_seconds, end_seconds) {
+        command
+            .args(["-ss", &format!("{start:.3}")])
+            .args(["-t", &format!("{:.3}", end - start)]);
+    }
+    let output = command
         .args(["-vn", "-ac", "2", "-ar", "44100"])
         .arg(output_path)
         .output()?;

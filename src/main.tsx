@@ -1,12 +1,14 @@
 import { flushSync } from "react-dom";
 import ReactDOM from "react-dom/client";
 import { open } from "@tauri-apps/plugin-dialog";
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { CheckCircle2, Copy, FileAudio, FolderOpen, Loader2, Terminal } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 
+import { AudioPlayer } from "@/components/ui/audio-player";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Slider } from "@/components/ui/slider";
 import "./styles.css";
 
 type Confidence = "낮음" | "중간" | "높음";
@@ -111,6 +113,13 @@ const pillList = (items: ScoredValue[]) =>
     </Badge>
   ));
 
+const formatClock = (seconds: number) => {
+  const total = Math.max(0, Math.round(seconds));
+  const mins = Math.floor(total / 60);
+  const secs = total % 60;
+  return `${mins}:${secs.toString().padStart(2, "0")}`;
+};
+
 const inProgressStatuses = new Set<JobStatus>(["preprocessing", "analyzing", "prompting"]);
 
 const statusBadgeVariant = (status: JobStatus) => {
@@ -205,6 +214,9 @@ function App() {
   const [toolStatus, setToolStatus] = useState<ToolStatus | null>(null);
   const [recentJobs, setRecentJobs] = useState<RecentJob[]>([]);
   const [isRunning, setIsRunning] = useState(false);
+  const [duration, setDuration] = useState<number | null>(null);
+  const [segmentEnabled, setSegmentEnabled] = useState(false);
+  const [segment, setSegment] = useState<[number, number]>([0, 0]);
 
   useEffect(() => {
     void refreshLocalState();
@@ -233,12 +245,19 @@ function App() {
     setRecentJobs(jobs);
   };
 
+  const resetSegment = (nextDuration: number | null) => {
+    setDuration(nextDuration);
+    setSegmentEnabled(false);
+    setSegment([0, nextDuration ?? 0]);
+  };
+
   const selectFile = async () => {
     setError(null);
     if (!isTauriRuntime()) {
       setSelectedPath("/tmp/timbreprint-demo.mp3");
       setStatus("selected");
       setJob(null);
+      resetSegment(180);
       return;
     }
 
@@ -250,6 +269,10 @@ function App() {
       setSelectedPath(file);
       setStatus("selected");
       setJob(null);
+      const probed = await invoke<number | null>("probe_audio_duration", {
+        sourcePath: file,
+      });
+      resetSegment(probed ?? null);
     }
   };
 
@@ -272,8 +295,11 @@ function App() {
         return;
       }
 
+      const useSegment = segmentEnabled && duration !== null;
       const result = await invoke<JobResult>("run_analysis", {
         sourcePath: selectedPath,
+        startSeconds: useSegment ? segment[0] : null,
+        endSeconds: useSegment ? segment[1] : null,
       });
       setJob(result);
       setStatus(result.status);
@@ -299,6 +325,8 @@ function App() {
 
   const fileStateLabel = selectedPath ? "File loaded" : "No file";
   const outputStateLabel = job ? "Prompt ready" : "No output";
+  const audioSrc =
+    selectedPath && isTauriRuntime() ? convertFileSrc(selectedPath) : "";
 
   return (
     <main className="app-shell">
@@ -341,6 +369,47 @@ function App() {
             </div>
 
             {selectedPath ? <p className="selected-path">{selectedPath}</p> : null}
+
+            {selectedPath && duration !== null ? (
+              <div className="segment">
+                <AudioPlayer
+                  duration={duration}
+                  loopEnd={segmentEnabled ? segment[1] : undefined}
+                  loopStart={segmentEnabled ? segment[0] : undefined}
+                  src={audioSrc}
+                />
+                <div className="segment-head">
+                  <label>Segment</label>
+                  <label className="segment-toggle">
+                    <input
+                      checked={segmentEnabled}
+                      disabled={isRunning}
+                      onChange={(event) => setSegmentEnabled(event.target.checked)}
+                      type="checkbox"
+                    />
+                    Trim
+                  </label>
+                </div>
+                <Slider
+                  disabled={!segmentEnabled || isRunning}
+                  max={duration}
+                  min={0}
+                  minStepsBetweenThumbs={1}
+                  onValueChange={(value) => setSegment([value[0], value[1]])}
+                  step={1}
+                  value={segment}
+                />
+                <div className="segment-range">
+                  <span>{formatClock(segment[0])}</span>
+                  <span>
+                    {segmentEnabled
+                      ? `${formatClock(segment[1] - segment[0])} selected`
+                      : `${formatClock(duration)} full`}
+                  </span>
+                  <span>{formatClock(segment[1])}</span>
+                </div>
+              </div>
+            ) : null}
 
             <div className="actions">
               <Button
